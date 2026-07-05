@@ -318,6 +318,11 @@ def place_order(sig):
         print(f"   [DRY-RUN] would place: {plan}")
         return {"ok": True, "dryRun": True, "wouldSend": plan}
 
+    # Stamp the strategy/setup into the order comment (MT5 caps at ~31 chars)
+    # so History/audits can attribute every trade to its strategy.
+    setup = re.sub(r"[^A-Za-z0-9 +/_-]", "", str(sig.get("setup") or ""))[:20].strip()
+    comment = f"AE {setup}" if setup else "AlphaEdge"
+
     base_req = {
         "action":    mt5.TRADE_ACTION_DEAL,
         "symbol":    symbol,
@@ -328,7 +333,7 @@ def place_order(sig):
         "tp":        tp,
         "deviation": DEVIATION,
         "magic":     MAGIC,
-        "comment":   "AlphaEdge",
+        "comment":   comment,
         "type_time": mt5.ORDER_TIME_GTC,
     }
 

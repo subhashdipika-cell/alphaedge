@@ -972,6 +972,7 @@ async function sendToMT5(parsed, assetLabel, tf) {
     riskReward: parsed.riskReward,
     confidence: parsed.confidence,
     nature:     parsed.nature,
+    setup:      parsed.setup || "",  // stamped into the MT5 order comment for attribution
     time:       new Date().toISOString(),
     source:     "AlphaEdge",
   };
@@ -2953,8 +2954,13 @@ const MONEY_MGT_DEFAULTS = {
   slPoints: 50,         // fixed stop-loss distance in price points
   rr: 2,                // reward:risk multiple (1, 1.5, 2, 2.5) or "trail"
   trailMaxRR: 3,        // in "trail" mode, run until this R:R (up to 50)
-  trailAfter1R: true,   // legacy toggle: move SL to breakeven & trail after 1:1
-  stepTrailEnabled: true,
+  // Step-trailing default OFF (2026-07-05): strategy-lab full-history grid
+  // tested 5 TSL ladders vs fixed SL/TP across 42 strategy×instrument combos —
+  // NO ladder beat Fixed (TSL cost −154% net across 60 combos, hurt in 34).
+  // Reversion/pullback entries retrace through entry before TP, so breakeven
+  // stops scratch winners. Re-enable per-trade from Money Mgt if wanted.
+  trailAfter1R: false,  // legacy toggle: move SL to breakeven & trail after 1:1
+  stepTrailEnabled: false,
   beTriggerR: 1,
   trailStartR: 1,
   trailStepPoints: 500,
