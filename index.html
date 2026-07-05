@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AlphaEdge — AI Trading Platform</title>
+    <meta name="description" content="ICT/SMC AI-powered trading platform with live TradingView charts, signal history, risk calculator, and Telegram broadcast." />
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⬡</text></svg>" />
+
+    <!-- Tabler Icons CDN (used throughout the UI) -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css" />
+
+    <!-- JetBrains Mono font (monospace used for prices / numbers) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+
+    <style>
+      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+      html, body, #root {
+        height: 100%;
+        width: 100%;
+        overflow: hidden;
+        background: #060d17;
+        color: #cbd5e1;
+        font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+      }
+
+      /* Custom scrollbars */
+      ::-webkit-scrollbar { width: 4px; height: 4px; }
+      ::-webkit-scrollbar-track { background: #0a1628; }
+      ::-webkit-scrollbar-thumb { background: #1e3a5a; border-radius: 2px; }
+      ::-webkit-scrollbar-thumb:hover { background: #3b82f6; }
+
+      /* TradingView widget full height fix */
+      .tradingview-widget-container,
+      .tradingview-widget-container__widget {
+        height: 100% !important;
+        width: 100% !important;
+      }
+
+      /* Remove focus outlines for cleaner UI */
+      button:focus, input:focus, select:focus, textarea:focus {
+        outline: none;
+      }
+
+      select option { background: #0a1628; color: #e2e8f0; }
+
+      input[type=number]::-webkit-inner-spin-button,
+      input[type=number]::-webkit-outer-spin-button { opacity: 0.4; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

@@ -1,0 +1,5 @@
+{
+  "_comment": "Copy this file to dhan_config.json and fill in your real credentials. dhan_config.json is read by dhan_collector.py and should NOT be shared or committed.",
+  "access_token": "PASTE_YOUR_DHAN_JWT_ACCESS_TOKEN_HERE",
+  "client_id": "PASTE_YOUR_DHAN_CLIENT_ID_HERE"
+}

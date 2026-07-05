@@ -1,0 +1,838 @@
+<h2 class="sr-only">AlphaEdge Discipline Dashboard — Score, Pre-trade Checklist, and Trade Log</h2>
+
+<style>
+
+  #dash*{box-sizing:border-box;}
+
+  #dash{padding:.5rem 0;font-family:var(--font-sans);}
+
+  .sc{background:var(--color-background-primary);border:.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-lg);padding:1.25rem;margin-bottom:12px;}
+
+  .sl{font-size:11px;font-weight:500;color:var(--color-text-secondary);letter-spacing:.07em;margin-bottom:14px;}
+
+  .ctrl-label{font-size:12px;color:var(--color-text-secondary);margin-bottom:4px;}
+
+  .ctrl-val{font-size:14px;font-weight:500;min-width:28px;text-align:right;color:var(--color-text-primary);}
+
+  .grp-label{font-size:11px;font-weight:500;color:var(--color-text-secondary);letter-spacing:.04em;padding-bottom:8px;border-bottom:.5px solid var(--color-border-tertiary);margin-bottom:4px;}
+
+  .chk-row{display:flex;align-items:flex-start;gap:10px;padding:9px 0;border-bottom:.5px solid var(--color-border-tertiary);}
+
+  .chk-row:last-child{border-bottom:none;}
+
+  .chk-row.man{cursor:pointer;}
+
+  .chk-row.man:hover{background:var(--color-background-secondary);margin:0 -4px;padding:9px 4px;border-radius:4px;}
+
+  .chk-box{width:18px;height:18px;border-radius:4px;border:1.5px solid var(--color-border-secondary);display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px;transition:.15s;}
+
+  .chk-box.pass{background:#3B6D11;border-color:#3B6D11;}
+
+  .chk-box.fail{background:#FCEBEB;border-color:#A32D2D;}
+
+  .chk-box.idle{background:var(--color-background-secondary);}
+
+  .ltable{width:100%;border-collapse:collapse;font-size:12px;}
+
+  .ltable th{font-size:10px;font-weight:500;color:var(--color-text-secondary);text-align:left;padding:6px 8px;border-bottom:.5px solid var(--color-border-tertiary);letter-spacing:.04em;white-space:nowrap;}
+
+  .ltable td{padding:8px;border-bottom:.5px solid var(--color-border-tertiary);color:var(--color-text-primary);vertical-align:middle;}
+
+  .ltable tr:last-child td{border-bottom:none;}
+
+  .pill{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:var(--border-radius-md);font-size:11px;font-weight:500;}
+
+</style>
+
+
+
+<div id="dash">
+
+
+
+<div class="sc" style="display:flex;align-items:center;gap:20px;">
+
+  <canvas id="scoreRing" width="88" height="88" style="flex-shrink:0;" role="img" aria-label="Discipline score ring">Score out of 100.</canvas>
+
+  <div style="flex:1;min-width:0;">
+
+    <div style="font-size:11px;color:var(--color-text-secondary);letter-spacing:.07em;margin-bottom:6px;">DISCIPLINE SCORE</div>
+
+    <div id="verdictBadge" style="display:inline-flex;align-items:center;padding:4px 14px;border-radius:var(--border-radius-md);font-size:13px;font-weight:500;margin-bottom:6px;"></div>
+
+    <div id="verdictText" style="font-size:13px;color:var(--color-text-secondary);line-height:1.5;"></div>
+
+  </div>
+
+  <div style="text-align:right;flex-shrink:0;">
+
+    <div id="clockDisplay" style="font-size:20px;font-weight:500;font-family:var(--font-mono);color:var(--color-text-primary);"></div>
+
+    <div id="mktChip" style="font-size:12px;margin-top:3px;"></div>
+
+  </div>
+
+</div>
+
+
+
+<div id="ruleGrid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:10px;margin-bottom:12px;"></div>
+
+
+
+<div class="sc">
+
+  <div class="sl">SESSION INPUTS</div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+
+    <div><div class="ctrl-label">Trades taken today</div><div style="display:flex;align-items:center;gap:8px;"><input type="range" min="0" max="10" value="0" step="1" id="sl_trades" oninput="onInput()" style="flex:1;"><span class="ctrl-val" id="v_trades">0</span></div></div>
+
+    <div><div class="ctrl-label">Consecutive losses</div><div style="display:flex;align-items:center;gap:8px;"><input type="range" min="0" max="6" value="0" step="1" id="sl_cons" oninput="onInput()" style="flex:1;"><span class="ctrl-val" id="v_cons">0</span></div></div>
+
+    <div><div class="ctrl-label">Minutes since last loss</div><div style="display:flex;align-items:center;gap:8px;"><input type="range" min="0" max="60" value="60" step="1" id="sl_cool" oninput="onInput()" style="flex:1;"><span class="ctrl-val" id="v_cool">60</span></div></div>
+
+    <div><div class="ctrl-label">Option premium (₹)</div><input type="number" id="inp_prem" value="50" oninput="onInput()" style="width:100%;font-size:13px;" placeholder="e.g. 45"></div>
+
+    <div><div class="ctrl-label">Today's P&L (₹)</div><input type="number" id="inp_pnl" value="0" oninput="onInput()" style="width:100%;font-size:13px;"></div>
+
+    <div style="display:flex;align-items:center;justify-content:space-between;"><div class="ctrl-label" style="margin-bottom:0;">Expiry day today?</div>
+
+      <div id="toggleBtn" onclick="toggleExpiry()" role="switch" aria-checked="false" tabindex="0" style="width:40px;height:22px;border-radius:22px;background:var(--color-border-secondary);cursor:pointer;position:relative;transition:.2s;flex-shrink:0;">
+
+        <div id="toggleThumb" style="position:absolute;width:16px;height:16px;left:3px;top:3px;background:white;border-radius:50%;transition:.2s;box-shadow:0 1px 2px rgba(0,0,0,.2);"></div>
+
+      </div>
+
+    </div>
+
+  </div>
+
+</div>
+
+
+
+<div class="sc">
+
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+
+    <div class="sl" style="margin-bottom:0;">PRE-TRADE CHECKLIST</div>
+
+    <button onclick="resetChecklist()" style="font-size:12px;">Reset ↺</button>
+
+  </div>
+
+  <div style="background:var(--color-background-secondary);border-radius:var(--border-radius-md);padding:12px;margin-bottom:16px;">
+
+    <div class="grp-label">Trade setup — fill before you proceed</div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;">
+
+      <div><div class="ctrl-label">Index</div>
+
+        <select id="ck_index" onchange="renderChecklist()" style="width:100%;font-size:13px;">
+
+          <option value="">— select —</option><option>NIFTY</option><option>BANKNIFTY</option><option>SENSEX</option><option>MIDCPNIFTY</option><option>FINNIFTY</option>
+
+        </select></div>
+
+      <div><div class="ctrl-label">CE or PE</div>
+
+        <select id="ck_type" onchange="renderChecklist()" style="width:100%;font-size:13px;">
+
+          <option value="">— select —</option><option>CE (Call)</option><option>PE (Put)</option>
+
+        </select></div>
+
+      <div><div class="ctrl-label">Strike price</div><input type="text" id="ck_strike" placeholder="e.g. 24500" oninput="renderChecklist()" style="width:100%;font-size:13px;"></div>
+
+      <div><div class="ctrl-label">Premium (₹)</div><input type="number" id="ck_prem" placeholder="e.g. 55" oninput="renderChecklist()" style="width:100%;font-size:13px;"></div>
+
+    </div>
+
+    <div><div class="ctrl-label">Why am I taking this trade? <span style="color:var(--color-text-tertiary);">(required)</span></div>
+
+      <textarea id="ck_reason" rows="2" placeholder="e.g. NIFTY broke resistance at 24450 with volume, expecting continuation…" oninput="renderChecklist()" style="width:100%;font-size:13px;resize:vertical;min-height:52px;"></textarea></div>
+
+  </div>
+
+  <div style="margin-bottom:16px;"><div class="grp-label">Auto-checks — from your session</div><div id="autoChecks"></div></div>
+
+  <div style="margin-bottom:16px;"><div class="grp-label">Manual confirmations — tick each honestly</div><div id="manualChecks"></div></div>
+
+  <div id="checklistVerdict"></div>
+
+</div>
+
+
+
+<div class="sc">
+
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
+
+    <div class="sl" style="margin-bottom:0;">DAILY TRADE LOG</div>
+
+    <div style="display:flex;gap:8px;align-items:center;">
+
+      <button onclick="selectFolder()" id="folderBtn" style="font-size:12px;"><i class="ti ti-folder" aria-hidden="true"></i> Set folder</button>
+
+      <button onclick="saveLog()" id="saveBtn" style="font-size:12px;" disabled><i class="ti ti-brand-obsidian" aria-hidden="true"></i> Save to Obsidian ↗</button>
+
+    </div>
+
+  </div>
+
+  <div id="folderStatus" style="margin-bottom:12px;">
+
+    <div style="font-size:12px;color:var(--color-text-secondary);padding:8px 10px;background:var(--color-background-secondary);border-radius:var(--border-radius-md);">
+
+      <i class="ti ti-info-circle" aria-hidden="true" style="font-size:13px;vertical-align:-1px;margin-right:4px;"></i>
+
+      Click <strong style="font-weight:500;">Set folder</strong>, then navigate to <span style="font-family:var(--font-mono);font-size:11px;">E:\Obsidian\Trading_Mind\raw\trades</span>
+
+    </div>
+
+  </div>
+
+  <div id="logContent"></div>
+
+</div>
+
+
+
+<div class="sc">
+
+  <div class="sl">MARKET CONDITION ADVISOR</div>
+
+  <div style="display:flex;gap:8px;margin-bottom:10px;">
+
+    <input type="text" id="mktQuery" placeholder="Describe what you see in NIFTY/BANKNIFTY right now…" style="flex:1;font-size:13px;">
+
+    <button onclick="analyzeMarket()" id="analyzeBtn" style="font-size:13px;white-space:nowrap;">Analyze ↗</button>
+
+  </div>
+
+  <div id="mktResult" style="display:none;"></div>
+
+</div>
+
+
+
+</div>
+
+
+
+<script>
+
+let expiryDay = false;
+
+let dirHandle = null;
+
+let folderName = '';
+
+let tradeLogs = [];
+
+const manualItems = [
+
+  {id:'m1',text:'I have a defined stop-loss — will exit at −30% of premium',checked:false},
+
+  {id:'m2',text:'I have a defined target — will exit at +50% or before 3 PM',checked:false},
+
+  {id:'m3',text:'This is NOT a revenge trade after a loss',checked:false},
+
+  {id:'m4',text:'I am not chasing — I confirmed the setup before entering',checked:false},
+
+  {id:'m5',text:'Market direction is clear to me, not a random guess',checked:false},
+
+  {id:'m6',text:'I accept this trade may lose and my risk is controlled',checked:false}
+
+];
+
+
+
+function toggleExpiry(){
+
+  expiryDay=!expiryDay;
+
+  document.getElementById('toggleBtn').style.background=expiryDay?'#A32D2D':'var(--color-border-secondary)';
+
+  document.getElementById('toggleThumb').style.left=expiryDay?'21px':'3px';
+
+  document.getElementById('toggleBtn').setAttribute('aria-checked',String(expiryDay));
+
+  onInput();
+
+}
+
+function toggleManual(id){const m=manualItems.find(x=>x.id===id);if(m){m.checked=!m.checked;renderChecklist();}}
+
+function resetChecklist(){
+
+  manualItems.forEach(m=>m.checked=false);
+
+  ['ck_index','ck_type','ck_strike','ck_prem','ck_reason'].forEach(id=>{const e=document.getElementById(id);if(e)e.value='';});
+
+  renderChecklist();
+
+}
+
+function getMktStatus(){const t=new Date();const m=t.getHours()*60+t.getMinutes();if(m<555||m>=930)return'closed';if(m<615)return'lockout';return'open';}
+
+
+
+function drawRing(score){
+
+  const c=document.getElementById('scoreRing'),ctx=c.getContext('2d'),dk=matchMedia('(prefers-color-scheme:dark)').matches;
+
+  ctx.clearRect(0,0,88,88);
+
+  ctx.beginPath();ctx.arc(44,44,34,0,2*Math.PI);ctx.strokeStyle=dk?'rgba(255,255,255,.08)':'rgba(0,0,0,.08)';ctx.lineWidth=7;ctx.stroke();
+
+  const col=score>=80?'#3B6D11':score>=50?'#BA7517':'#A32D2D';
+
+  ctx.beginPath();ctx.arc(44,44,34,-Math.PI/2,-Math.PI/2+2*Math.PI*score/100);ctx.strokeStyle=col;ctx.lineWidth=7;ctx.lineCap='round';ctx.stroke();
+
+  ctx.fillStyle=dk?'#fff':'#2C2C2A';ctx.font='500 17px system-ui';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(score,44,41);
+
+  ctx.font='400 9px system-ui';ctx.fillStyle=dk?'rgba(255,255,255,.4)':'rgba(0,0,0,.35)';ctx.fillText('/ 100',44,55);
+
+}
+
+
+
+function getRules(){
+
+  const tr=parseInt(document.getElementById('sl_trades').value),co=parseInt(document.getElementById('sl_cons').value),cl=parseInt(document.getElementById('sl_cool').value),pr=parseFloat(document.getElementById('inp_prem').value)||0,mk=getMktStatus();
+
+  return[
+
+    {name:'Cooldown clear',detail:cl<15?`${15-cl} min remaining`:`${cl} min since loss`,pass:cl>=15,weight:20,fail:'Wait 15 min after a loss.'},
+
+    {name:'Under daily cap',detail:`${tr} of 3 trades`,pass:tr<=3,weight:20,fail:`${tr} trades — at the limit.`},
+
+    {name:'No consec. losses',detail:`${co} in a row`,pass:co<2,weight:25,fail:`${co} losses in a row. Stop now.`},
+
+    {name:'Open lockout clear',detail:mk==='lockout'?'Active 9:15–10:15':mk==='closed'?'Market closed':'All clear',pass:mk!=='lockout',weight:15,fail:'No trades before 10:15 AM.'},
+
+    {name:'0-DTE blocked',detail:expiryDay?'Expiry day — blocked':'Not expiry day',pass:!expiryDay,weight:10,fail:'No option buys on expiry day.'},
+
+    {name:'Premium ≥ ₹40',detail:pr>0&&pr<40?`₹${pr} — below floor`:pr===0?'Enter premium':`₹${pr} — ok`,pass:pr===0||pr>=40,weight:10,fail:`₹${pr} is OTM lottery. Min ₹40.`}
+
+  ];
+
+}
+
+
+
+function renderRules(rules){
+
+  document.getElementById('ruleGrid').innerHTML=rules.map(r=>{
+
+    const col=r.pass?'#3B6D11':'#A32D2D';
+
+    return`<div style="background:var(--color-background-primary);border:.5px solid var(--color-border-tertiary);border-left:3px solid ${col};border-radius:var(--border-radius-md);padding:10px 12px;">
+
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:3px;"><span style="width:7px;height:7px;border-radius:50%;background:${col};flex-shrink:0;"></span><span style="font-size:12px;font-weight:500;color:var(--color-text-primary);">${r.name}</span></div>
+
+      <div style="font-size:11px;color:${r.pass?'var(--color-text-secondary)':'#A32D2D'};margin-bottom:${r.pass?0:'4px'};">${r.detail}</div>
+
+      ${!r.pass?`<div style="font-size:11px;color:#A32D2D;">${r.fail}</div>`:''}
+
+    </div>`;
+
+  }).join('');
+
+}
+
+
+
+function renderVerdict(score,rules){
+
+  const fails=rules.filter(r=>!r.pass);
+
+  let label,bg,fg,msg;
+
+  if(score>=80){label='✓  Clear to trade';bg='#EAF3DE';fg='#27500A';msg='All guardrails green. Trade within your plan.';}
+
+  else if(score>=50){label='⚠  Caution';bg='#FAEEDA';fg='#633806';msg=`${fails.length} rule${fails.length>1?'s':''} flagged: ${fails.map(r=>r.name).join(', ')}.`;}
+
+  else{label='✗  Stand down';bg='#FCEBEB';fg='#501313';msg=`${fails.length} guardrail${fails.length>1?'s':''} violated. Step away now.`;}
+
+  const b=document.getElementById('verdictBadge');
+
+  b.textContent=label;b.style.cssText=`display:inline-flex;align-items:center;padding:4px 14px;border-radius:var(--border-radius-md);font-size:13px;font-weight:500;margin-bottom:6px;background:${bg};color:${fg};`;
+
+  document.getElementById('verdictText').textContent=msg;
+
+}
+
+
+
+function chkIcon(pass){
+
+  if(pass)return`<svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M2 5l2.5 2.5L8 3" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
+  return`<svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M3 3l4 4M7 3l-4 4" stroke="#A32D2D" stroke-width="1.5" stroke-linecap="round"/></svg>`;
+
+}
+
+
+
+function renderChecklist(){
+
+  const rules=getRules(),allAutoPass=rules.every(r=>r.pass);
+
+  document.getElementById('autoChecks').innerHTML=rules.map(r=>`<div class="chk-row">
+
+    <div class="chk-box ${r.pass?'pass':'fail'}">${chkIcon(r.pass)}</div>
+
+    <div style="flex:1;"><div style="font-size:13px;color:var(--color-text-primary);line-height:1.4;">${r.name}</div>
+
+    <div style="font-size:11px;color:${r.pass?'var(--color-text-secondary)':'#A32D2D'};margin-top:1px;">${r.pass?r.detail:r.fail}</div></div>
+
+  </div>`).join('');
+
+  document.getElementById('manualChecks').innerHTML=manualItems.map(m=>`<div class="chk-row man" onclick="toggleManual('${m.id}')">
+
+    <div class="chk-box ${m.checked?'pass':'idle'}">${m.checked?chkIcon(true):''}</div>
+
+    <div style="flex:1;"><div style="font-size:13px;color:var(--color-text-primary);line-height:1.4;">${m.text}</div></div>
+
+  </div>`).join('');
+
+
+
+  const idx=document.getElementById('ck_index').value,typ=document.getElementById('ck_type').value,
+
+    stk=document.getElementById('ck_strike').value.trim(),prm=document.getElementById('ck_prem').value.trim(),
+
+    rsn=document.getElementById('ck_reason').value.trim();
+
+  const setupOk=!!(idx&&typ&&stk&&prm&&rsn.length>=10);
+
+  const allMan=manualItems.every(m=>m.checked);
+
+  const approved=setupOk&&allAutoPass&&allMan;
+
+
+
+  const blockers=[];
+
+  if(!setupOk)blockers.push('Complete trade setup above (all 5 fields)');
+
+  if(!allAutoPass)blockers.push(`Guardrails failing: ${rules.filter(r=>!r.pass).map(r=>r.name).join(', ')}`);
+
+  if(!allMan){const rem=manualItems.filter(m=>!m.checked).length;blockers.push(`${rem} manual confirmation${rem>1?'s':''} remaining`);}
+
+
+
+  const vEl=document.getElementById('checklistVerdict');
+
+  if(approved){
+
+    const sl=prm?`₹${Math.round(parseFloat(prm)*.7)}`:'—',tgt=prm?`₹${Math.round(parseFloat(prm)*1.5)}`:'—';
+
+    vEl.innerHTML=`<div style="background:#EAF3DE;border:.5px solid #97C459;border-radius:var(--border-radius-md);padding:14px;">
+
+      <div style="font-size:14px;font-weight:500;color:#173404;margin-bottom:10px;">✓  Approved to trade</div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px;">
+
+        <div style="background:white;border-radius:var(--border-radius-md);padding:8px;border:.5px solid #C0DD97;"><div style="font-size:10px;color:#3B6D11;margin-bottom:2px;">TRADE</div><div style="font-size:12px;font-weight:500;color:#173404;">${idx} ${stk} ${typ}</div></div>
+
+        <div style="background:white;border-radius:var(--border-radius-md);padding:8px;border:.5px solid #C0DD97;"><div style="font-size:10px;color:#3B6D11;margin-bottom:2px;">STOP-LOSS</div><div style="font-size:13px;font-weight:500;color:#A32D2D;">${sl}</div></div>
+
+        <div style="background:white;border-radius:var(--border-radius-md);padding:8px;border:.5px solid #C0DD97;"><div style="font-size:10px;color:#3B6D11;margin-bottom:2px;">TARGET</div><div style="font-size:13px;font-weight:500;color:#173404;">${tgt}</div></div>
+
+      </div>
+
+      <div style="font-size:12px;color:#27500A;font-style:italic;line-height:1.5;margin-bottom:12px;">"${rsn}"</div>
+
+      <button onclick="logTrade()" style="font-size:13px;font-weight:500;background:#3B6D11;color:white;border:none;padding:7px 16px;border-radius:var(--border-radius-md);cursor:pointer;">
+
+        <i class="ti ti-plus" aria-hidden="true"></i> Log this trade
+
+      </button>
+
+    </div>`;
+
+  } else {
+
+    const prog=[setupOk,allAutoPass,allMan].filter(Boolean).length;
+
+    const pct=Math.round(prog/3*100);
+
+    vEl.innerHTML=`<div style="background:var(--color-background-secondary);border-radius:var(--border-radius-md);padding:14px;">
+
+      <div style="display:flex;justify-content:space-between;margin-bottom:8px;"><span style="font-size:13px;font-weight:500;color:var(--color-text-primary);">Checklist progress</span><span style="font-size:12px;color:var(--color-text-secondary);">${pct}%</span></div>
+
+      <div style="height:5px;background:var(--color-border-tertiary);border-radius:4px;overflow:hidden;margin-bottom:12px;"><div style="height:100%;width:${pct}%;background:${pct===100?'#3B6D11':'#BA7517'};border-radius:4px;transition:.3s;"></div></div>
+
+      ${blockers.map(b=>`<div style="font-size:12px;color:var(--color-text-secondary);margin-bottom:4px;display:flex;gap:7px;align-items:flex-start;"><span style="width:5px;height:5px;border-radius:50%;background:#BA7517;flex-shrink:0;margin-top:5px;"></span>${b}</div>`).join('')}
+
+    </div>`;
+
+  }
+
+}
+
+
+
+function logTrade(){
+
+  const now=new Date();
+
+  const timeStr=now.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false});
+
+  const idx=document.getElementById('ck_index').value;
+
+  const typ=document.getElementById('ck_type').value;
+
+  const stk=document.getElementById('ck_strike').value.trim();
+
+  const prm=parseFloat(document.getElementById('ck_prem').value)||0;
+
+  const rsn=document.getElementById('ck_reason').value.trim();
+
+  const rules=getRules();
+
+  const score=Math.max(0,100-rules.filter(r=>!r.pass).reduce((s,r)=>s+r.weight,0));
+
+  const sl=Math.round(prm*.7),tgt=Math.round(prm*1.5);
+
+  tradeLogs.push({time:timeStr,date:now,idx,typ,stk,prm,sl,tgt,rsn,score});
+
+  renderTradeLog();
+
+  resetChecklist();
+
+  document.getElementById('saveBtn').disabled=false;
+
+  document.getElementById('logContent').scrollIntoView({behavior:'smooth',block:'nearest'});
+
+}
+
+
+
+function renderTradeLog(){
+
+  const el=document.getElementById('logContent');
+
+  if(tradeLogs.length===0){
+
+    el.innerHTML=`<div style="font-size:13px;color:var(--color-text-secondary);text-align:center;padding:20px 0;">No trades logged yet — complete the checklist and click "Log this trade"</div>`;
+
+    return;
+
+  }
+
+  const pnl=parseFloat(document.getElementById('inp_pnl').value)||0;
+
+  el.innerHTML=`
+
+    <div style="display:flex;gap:12px;margin-bottom:12px;">
+
+      <div style="background:var(--color-background-secondary);border-radius:var(--border-radius-md);padding:10px 14px;flex:1;text-align:center;">
+
+        <div style="font-size:10px;color:var(--color-text-secondary);margin-bottom:2px;">TRADES LOGGED</div>
+
+        <div style="font-size:20px;font-weight:500;color:var(--color-text-primary);">${tradeLogs.length}</div>
+
+      </div>
+
+      <div style="background:var(--color-background-secondary);border-radius:var(--border-radius-md);padding:10px 14px;flex:1;text-align:center;">
+
+        <div style="font-size:10px;color:var(--color-text-secondary);margin-bottom:2px;">TODAY'S P&L</div>
+
+        <div style="font-size:20px;font-weight:500;color:${pnl>=0?'#3B6D11':'#A32D2D'};">${pnl>=0?'+':''}₹${pnl.toLocaleString('en-IN')}</div>
+
+      </div>
+
+      <div style="background:var(--color-background-secondary);border-radius:var(--border-radius-md);padding:10px 14px;flex:1;text-align:center;">
+
+        <div style="font-size:10px;color:var(--color-text-secondary);margin-bottom:2px;">AVG SCORE</div>
+
+        <div style="font-size:20px;font-weight:500;color:var(--color-text-primary);">${Math.round(tradeLogs.reduce((s,t)=>s+t.score,0)/tradeLogs.length)}</div>
+
+      </div>
+
+    </div>
+
+    <div style="overflow-x:auto;">
+
+    <table class="ltable">
+
+      <thead><tr>
+
+        <th>TIME</th><th>TRADE</th><th>PREM</th><th>SL</th><th>TARGET</th><th>SCORE</th><th>REASON</th>
+
+      </tr></thead>
+
+      <tbody>
+
+        ${tradeLogs.map((t,i)=>`<tr>
+
+          <td style="font-family:var(--font-mono);font-size:11px;white-space:nowrap;">${t.time}</td>
+
+          <td style="font-weight:500;white-space:nowrap;">${t.idx} ${t.stk} <span style="color:${t.typ.startsWith('CE')?'#3B6D11':'#A32D2D'};">${t.typ.split(' ')[0]}</span></td>
+
+          <td style="font-family:var(--font-mono);">₹${t.prm}</td>
+
+          <td style="font-family:var(--font-mono);color:#A32D2D;">₹${t.sl}</td>
+
+          <td style="font-family:var(--font-mono);color:#3B6D11;">₹${t.tgt}</td>
+
+          <td><span style="background:${t.score>=80?'#EAF3DE':t.score>=50?'#FAEEDA':'#FCEBEB'};color:${t.score>=80?'#27500A':t.score>=50?'#633806':'#501313'};padding:2px 8px;border-radius:var(--border-radius-md);font-size:11px;font-weight:500;">${t.score}</span></td>
+
+          <td style="font-size:11px;color:var(--color-text-secondary);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${t.rsn}">${t.rsn}</td>
+
+        </tr>`).join('')}
+
+      </tbody>
+
+    </table></div>`;
+
+}
+
+
+
+async function selectFolder(){
+
+  if(!('showDirectoryPicker' in window)){
+
+    folderName='download';
+
+    document.getElementById('folderStatus').innerHTML=`<div style="font-size:12px;color:var(--color-text-secondary);padding:8px 10px;background:#FAEEDA;border-radius:var(--border-radius-md);">⚠ Your browser does not support folder access. Files will be downloaded — move them to <span style="font-family:var(--font-mono);font-size:11px;">E:\\Obsidian\\Trading_Mind\\raw\\trades</span> manually.</div>`;
+
+    document.getElementById('saveBtn').disabled=tradeLogs.length===0;
+
+    return;
+
+  }
+
+  try{
+
+    dirHandle=await window.showDirectoryPicker({mode:'readwrite'});
+
+    folderName=dirHandle.name;
+
+    document.getElementById('folderStatus').innerHTML=`<div style="display:inline-flex;align-items:center;gap:6px;padding:5px 10px;background:var(--color-background-secondary);border:.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-md);font-size:12px;color:var(--color-text-secondary);">
+
+      <i class="ti ti-folder-check" aria-hidden="true" style="color:#3B6D11;"></i>
+
+      <span style="font-family:var(--font-mono);font-size:11px;">…/${folderName}</span>
+
+      <button onclick="selectFolder()" style="font-size:11px;border:none;background:none;padding:0;cursor:pointer;color:var(--color-text-tertiary);">change</button>
+
+    </div>`;
+
+    if(tradeLogs.length>0)document.getElementById('saveBtn').disabled=false;
+
+  }catch(e){if(e.name!=='AbortError')console.error(e);}
+
+}
+
+
+
+function generateMarkdown(){
+
+  const now=new Date();
+
+  const dateStr=now.toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'});
+
+  const iso=now.toISOString().slice(0,10);
+
+  const pnl=parseFloat(document.getElementById('inp_pnl').value)||0;
+
+  const avgScore=tradeLogs.length?Math.round(tradeLogs.reduce((s,t)=>s+t.score,0)/tradeLogs.length):0;
+
+  let md=`---\ndate: ${iso}\ntype: trade-log\nbroker: AlphaEdge\ntags: [trading, discipline]\n---\n\n`;
+
+  md+=`# Trade Log — ${dateStr}\n\n`;
+
+  md+=`## Session Summary\n\n`;
+
+  md+=`| Metric | Value |\n|--------|-------|\n`;
+
+  md+=`| Avg Discipline Score | ${avgScore}/100 |\n`;
+
+  md+=`| Trades Logged | ${tradeLogs.length} |\n`;
+
+  md+=`| Today's P&L | ${pnl>=0?'+':''}₹${pnl.toLocaleString('en-IN')} |\n\n`;
+
+  md+=`## Trades\n\n`;
+
+  tradeLogs.forEach((t,i)=>{
+
+    md+=`### Trade ${i+1} — ${t.time}  |  ${t.idx} ${t.stk} ${t.typ.split(' ')[0]}\n\n`;
+
+    md+=`| Field | Value |\n|-------|-------|\n`;
+
+    md+=`| Premium | ₹${t.prm} |\n`;
+
+    md+=`| Stop-loss | ₹${t.sl} (−30%) |\n`;
+
+    md+=`| Target | ₹${t.tgt} (+50%) |\n`;
+
+    md+=`| Discipline Score at entry | ${t.score}/100 |\n\n`;
+
+    md+=`**Reason:** ${t.rsn}\n\n---\n\n`;
+
+  });
+
+  return md;
+
+}
+
+
+
+async function saveLog(){
+
+  if(tradeLogs.length===0){alert('No trades logged yet.');return;}
+
+  const iso=new Date().toISOString().slice(0,10);
+
+  const filename=`${iso}_trade_log.md`;
+
+  const md=generateMarkdown();
+
+  if(dirHandle&&dirHandle!=='download'){
+
+    try{
+
+      const fh=await dirHandle.getFileHandle(filename,{create:true});
+
+      const wr=await fh.createWritable();
+
+      await wr.write(md);await wr.close();
+
+      document.getElementById('folderStatus').innerHTML=`<div style="display:inline-flex;align-items:center;gap:6px;padding:5px 10px;background:#EAF3DE;border-radius:var(--border-radius-md);font-size:12px;color:#27500A;">
+
+        <i class="ti ti-circle-check" aria-hidden="true"></i> Saved: <span style="font-family:var(--font-mono);font-size:11px;">${filename}</span> → <span style="font-family:var(--font-mono);font-size:11px;">${folderName}</span>
+
+      </div>`;
+
+      return;
+
+    }catch(e){console.error(e);}
+
+  }
+
+  const blob=new Blob([md],{type:'text/markdown'});
+
+  const url=URL.createObjectURL(blob);
+
+  const a=document.createElement('a');a.href=url;a.download=filename;a.click();
+
+  URL.revokeObjectURL(url);
+
+  document.getElementById('folderStatus').innerHTML=`<div style="font-size:12px;color:var(--color-text-secondary);padding:8px 10px;background:#FAEEDA;border-radius:var(--border-radius-md);">
+
+    <i class="ti ti-download" aria-hidden="true"></i> Downloaded <span style="font-family:var(--font-mono);font-size:11px;">${filename}</span> — move it to <span style="font-family:var(--font-mono);font-size:11px;">E:\\Obsidian\\Trading_Mind\\raw\\trades</span>
+
+  </div>`;
+
+}
+
+
+
+function onInput(){
+
+  document.getElementById('v_trades').textContent=document.getElementById('sl_trades').value;
+
+  document.getElementById('v_cons').textContent=document.getElementById('sl_cons').value;
+
+  document.getElementById('v_cool').textContent=document.getElementById('sl_cool').value;
+
+  const rules=getRules();
+
+  const score=Math.max(0,100-rules.filter(r=>!r.pass).reduce((s,r)=>s+r.weight,0));
+
+  drawRing(score);renderRules(rules);renderVerdict(score,rules);renderChecklist();
+
+  if(tradeLogs.length>0)renderTradeLog();
+
+}
+
+
+
+function updateClock(){
+
+  const now=new Date();
+
+  document.getElementById('clockDisplay').textContent=now.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+
+  const mk=getMktStatus(),ch=document.getElementById('mktChip');
+
+  if(mk==='closed'){ch.textContent='Market closed';ch.style.color='var(--color-text-tertiary)';}
+
+  else if(mk==='lockout'){ch.textContent='⚠ Open lockout active';ch.style.color='#BA7517';}
+
+  else{ch.textContent='● Market open';ch.style.color='#3B6D11';}
+
+  onInput();
+
+}
+
+
+
+async function analyzeMarket(){
+
+  const q=document.getElementById('mktQuery').value.trim();if(!q)return;
+
+  const btn=document.getElementById('analyzeBtn'),out=document.getElementById('mktResult');
+
+  btn.textContent='Analyzing…';btn.disabled=true;out.style.display='block';
+
+  out.innerHTML='<div style="font-size:13px;color:var(--color-text-secondary);">Reading market conditions…</div>';
+
+  try{
+
+    const resp=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},
+
+      body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:1000,
+
+        system:`You are a strict risk advisor for an Indian F&O options buyer (NIFTY/BANKNIFTY). Known weaknesses: revenge trading, OTM lottery, FOMO open, holding losers. Respond ONLY valid JSON no markdown:\n{"condition":"VOLATILE|TRENDING|SIDEWAYS|UNKNOWN","verdict":"DO NOT TRADE|TRADE WITH CAUTION|GOOD CONDITIONS","reason":"2-3 sentences","warning":"one personalised warning or null"}`,
+
+        messages:[{role:'user',content:q}]})});
+
+    const data=await resp.json();
+
+    const raw=(data.content||[]).map(c=>c.text||'').join('');
+
+    let p;try{p=JSON.parse(raw.replace(/```json|```/g,'').trim());}catch{p={condition:'UNKNOWN',verdict:'TRADE WITH CAUTION',reason:raw,warning:null};}
+
+    const cM={VOLATILE:['#FCEBEB','#A32D2D'],SIDEWAYS:['#FAEEDA','#BA7517'],TRENDING:['#EAF3DE','#3B6D11'],UNKNOWN:['var(--color-background-secondary)','var(--color-text-secondary)']};
+
+    const vM={'DO NOT TRADE':['#FCEBEB','#501313'],'TRADE WITH CAUTION':['#FAEEDA','#633806'],'GOOD CONDITIONS':['#EAF3DE','#173404']};
+
+    const[cb,cf]=cM[p.condition]||cM.UNKNOWN;const[vb,vf]=vM[p.verdict]||vM['TRADE WITH CAUTION'];
+
+    out.innerHTML=`<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
+
+      <span style="background:${cb};color:${cf};padding:4px 12px;border-radius:var(--border-radius-md);font-size:12px;font-weight:500;">${p.condition}</span>
+
+      <span style="background:${vb};color:${vf};padding:4px 12px;border-radius:var(--border-radius-md);font-size:12px;font-weight:500;">${p.verdict}</span></div>
+
+    <div style="font-size:13px;color:var(--color-text-secondary);line-height:1.6;margin-bottom:${p.warning?'8px':'0'};">${p.reason}</div>
+
+    ${p.warning?`<div style="font-size:12px;color:#A32D2D;background:#FCEBEB;padding:8px 12px;border-radius:var(--border-radius-md);line-height:1.5;">⚠ ${p.warning}</div>`:''}`;
+
+  }catch{out.innerHTML='<div style="font-size:13px;color:var(--color-text-secondary);">Could not analyze. Try again.</div>';}
+
+  btn.textContent='Analyze ↗';btn.disabled=false;
+
+}
+
+
+
+renderTradeLog();
+
+onInput();
+
+updateClock();
+
+setInterval(updateClock,1000);
+
+</script> 
+

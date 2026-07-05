@@ -1,0 +1,48 @@
+{
+  "name": "alphaedge",
+  "version": "3.0.0",
+  "description": "AlphaEdge — AI-powered ICT/SMC trading platform with live charts, signals, backtesting, and risk tools.",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "author": "Subhash",
+  "keywords": [
+    "trading",
+    "ict",
+    "smc",
+    "react",
+    "vite",
+    "tradingview",
+    "backtesting"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev": "vite --host",
+    "build": "vite build",
+    "preview": "vite preview --host",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write \"**/*.{js,jsx,json,css,md}\"",
+    "format:check": "prettier --check \"**/*.{js,jsx,json,css,md}\""
+  },
+  "dependencies": {
+    "lightweight-charts": "^5.2.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.13.0",
+    "@types/react": "^18.3.1",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.1",
+    "eslint": "^9.13.0",
+    "eslint-plugin-react": "^7.37.1",
+    "eslint-plugin-react-hooks": "^5.0.0",
+    "eslint-plugin-react-refresh": "^0.4.14",
+    "globals": "^15.11.0",
+    "prettier": "^3.3.3",
+    "vite": "^5.4.10"
+  }
+}
