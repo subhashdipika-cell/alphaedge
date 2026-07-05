@@ -416,6 +416,15 @@ function buildMonthlyMarkdown(month, records) {
     return t;
   };
 
+  // Broker-realized stats — ONLY trades that actually filled and closed on
+  // MT5 (realizedUsd synced from the bridge). The theoretical R/win-rate above
+  // counts unresolved signals at their planned RR; cross-app audit (Jul 2026)
+  // showed that flatters strategies by 3-8x vs what the broker actually pays.
+  const mt5 = records.filter(r => r.realizedUsd != null && (r.mt5State === "closed" || r.outcome === "win" || r.outcome === "loss"));
+  const mt5Wins = mt5.filter(r => Number(r.realizedUsd) > 0).length;
+  const mt5Net  = mt5.reduce((a, r) => a + Number(r.realizedUsd || 0), 0);
+  const mt5Wr   = mt5.length ? (100 * mt5Wins / mt5.length) : null;
+
   let md = `---\n`
     + `type: monthly-trade-summary\n`
     + `app: ${OBSIDIAN_APP}\n`
@@ -429,11 +438,19 @@ function buildMonthlyMarkdown(month, records) {
     + `win_rate: ${wr}\n`
     + `net_r: ${s.netR.toFixed(1)}\n`
     + `avg_rr: ${s.avgRR.toFixed(2)}\n`
+    + `mt5_trades: ${mt5.length}\n`
+    + `mt5_win_rate: ${mt5Wr == null ? "" : mt5Wr.toFixed(1)}\n`
+    + `mt5_net_usd: ${mt5Net.toFixed(2)}\n`
     + `tags:\n  - ${OBSIDIAN_APP}\n  - monthly\n  - trades\n  - ${month}\n`
     + `---\n\n`;
   md += `# AlphaEdge — ${monthName} ${yr} Trade Summary\n\n`;
   md += `**${s.total} trades** · ${s.wins}W / ${s.losses}L · **${wr || "—"}% win rate** · `
       + `net **${s.netR >= 0 ? "+" : ""}${s.netR.toFixed(1)}R** · avg RR ${s.avgRR.toFixed(2)} · ${s.pending} pending\n`;
+  md += `\n> **Broker-realized (MT5 fills, net of spread): ${mt5.length} trades · `
+      + `${mt5Wr == null ? "—" : mt5Wr.toFixed(1) + "%"} win rate · `
+      + `${mt5Net >= 0 ? "+" : ""}$${mt5Net.toFixed(2)}.** `
+      + `The theoretical figures above count unresolved signals at planned RR — `
+      + `trust this line, not those.\n`;
   md += section("setup",     monthlyGroupRows(records, r => r.setup));
   md += section("asset",     monthlyGroupRows(records, r => r.asset || r.assetId));
   md += section("timeframe", monthlyGroupRows(records, r => r.timeframe));
