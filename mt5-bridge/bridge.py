@@ -1024,6 +1024,34 @@ def get_alphaedge_trades(days=30):
     return {"trades": out, "magic": MAGIC, "count": len(out)}
 
 
+def setup_performance(days=30):
+    """Broker-realized performance per setup, grouped by the 'AE <setup>'
+    order comments stamped on every order since 2026-07-05. This feeds the
+    app's AI prompt so signal generation learns from ACTUAL MT5 fills —
+    the cross-app audit showed theoretical R scorecards overstate results
+    3-8x vs what the broker pays. Older untagged trades group separately."""
+    data = get_alphaedge_trades(days)
+    perf = {}
+    for t in data.get("trades", []):
+        if t.get("state") != "closed":
+            continue
+        label = (t.get("comment") or "").strip()
+        if label.startswith("AE "):
+            label = label[3:].strip()
+        if label in ("", "AlphaEdge"):
+            label = "(untagged)"
+        p = perf.setdefault(label, {"trades": 0, "wins": 0, "net": 0.0})
+        p["trades"] += 1
+        if float(t.get("profit") or 0) > 0:
+            p["wins"] += 1
+        p["net"] += float(t.get("profit") or 0)
+    setups = [{"setup": k, "trades": p["trades"],
+               "winRate": round(100.0 * p["wins"] / p["trades"], 1),
+               "net": round(p["net"], 2)} for k, p in perf.items()]
+    setups.sort(key=lambda r: -r["net"])
+    return {"ok": True, "days": days, "setups": setups}
+
+
 def _atm_iv_percentile(under_name, current_iv):
     """Best-effort IV percentile: where today's ATM IV sits vs the near-ATM IV
     we've collected in data/options/*.csv. Returns 0-100 or None if too little data."""
@@ -1520,6 +1548,9 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path.startswith("/history"):
             days = int(qs.get("days", ["30"])[0] or 30)
             self._send(200, get_alphaedge_trades(days))
+        elif parsed.path.startswith("/setups/performance"):
+            days = int(qs.get("days", ["30"])[0] or 30)
+            self._send(200, setup_performance(days))
         elif parsed.path == "/wiki/index":
             self._send(200, get_wiki_index())
         elif parsed.path == "/wiki/context":

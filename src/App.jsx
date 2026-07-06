@@ -3036,6 +3036,33 @@ function isIndianInstrument(asset) {
   return /NIFTY|BANKNIFTY|SENSEX|BANKEX|FINNIFTY|MIDCP/.test(s);
 }
 
+// Broker-realized per-setup performance (from the 'AE <setup>' MT5 order
+// comments) — the closed learning loop for signal generation: fetched from
+// the bridge (1h cache) and injected into the auto-screen AI prompt so it
+// favors setups that pay at REAL fills and avoids ones that lose. The
+// cross-app audit showed theoretical R overstates results 3-8x vs broker.
+let SETUP_PERF = null;
+let SETUP_PERF_TS = 0;
+async function fetchSetupPerformance() {
+  if (SETUP_PERF && Date.now() - SETUP_PERF_TS < 60 * 60 * 1000) return SETUP_PERF;
+  try {
+    const base = (getAnyBridgeUrl() || "").replace(/\/signal\/?$/, "");
+    if (!base) return SETUP_PERF;
+    const r = await fetch(`${base}/setups/performance?days=30`, { signal: AbortSignal.timeout(8000) });
+    const d = await r.json();
+    if (d && d.ok) { SETUP_PERF = d; SETUP_PERF_TS = Date.now(); }
+  } catch { /* bridge offline — keep last known */ }
+  return SETUP_PERF;
+}
+function setupPerfPromptSection() {
+  const rows = (SETUP_PERF?.setups || []).filter(s => s.trades >= 3 && s.setup !== "(untagged)");
+  if (!rows.length) return "";
+  const lines = rows.map(s => `- ${s.setup}: ${s.trades} trades, ${s.winRate}% win, net $${s.net}`);
+  return `\nBROKER-REALIZED SETUP PERFORMANCE (actual MT5 fills, last 30 days — trust this over theoretical win rates):\n`
+       + lines.join("\n")
+       + `\nPrefer setups with positive realized net. Reject or reduce confidence for setups losing at real fills.\n`;
+}
+
 // NSE holiday info — fetched once per session from the bridge, which refreshes
 // it daily from Dhan's public holiday calendar. Read synchronously by
 // evaluateGuardrails via this module cache.
@@ -3192,6 +3219,7 @@ function AutoSignalEngine({ prices, changes, enabled, onSignalSaved }) {
     if (!hasTelegram() || !hasAI()) return;
 
     setStatus("scanning");
+    await fetchSetupPerformance();   // refresh realized per-setup stats (1h cache)
     const log = [];
 
     for (const assetObj of ASSETS) {
@@ -3235,6 +3263,7 @@ Reasons: ${screen.reasons.join(", ")}
 Kill Zone: ${screen.activeKZ||"None"}
 ${autoWikiSection}
 ${stratContext}
+${setupPerfPromptSection()}
 ${ruleContext}
 
 TASK: Validate if this is a HIGH PROBABILITY trade. Only approve confidence >= 75.
