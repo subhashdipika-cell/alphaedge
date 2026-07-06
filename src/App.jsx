@@ -7052,6 +7052,32 @@ function SettingsPage() {
   );
 }
 
+// Reconcile signal outcomes from real MT5 trades (fills, realized P&L, close
+// times). Module-level and polled from the ROOT App: this used to run only
+// while the History page was mounted, so outcomes sat stale ("pending" with
+// old floating P&L) app-wide — quietly weakening the cooldown/loss-streak
+// guardrails and the broker-realized export until someone opened History.
+async function reconcileHistoryFromMT5(days = 45) {
+  const trades = await fetchMT5History(days);
+  if (!trades.length) return { trades, changed: false, next: null };
+  const cur = await loadHistory();
+  let changed = false;
+  const next = cur.map(s => {
+    const t = matchTradeToSignal(s, trades);
+    if (!t) return s;
+    const patch = { mt5Ticket: s.mt5Ticket || t.ticket, realizedUsd: t.profit, mt5State: t.state };
+    if (t.state === "closed") {
+      patch.outcome = t.profit >= 0 ? "win" : "loss";
+      if (t.close_time) patch.closedAt = t.close_time * 1000;   // for cooldown guardrail
+    }
+    const same = s.outcome===patch.outcome && s.realizedUsd===patch.realizedUsd && s.mt5State===patch.mt5State && String(s.mt5Ticket)===String(patch.mt5Ticket) && s.closedAt===patch.closedAt;
+    if (!same) changed = true;
+    return { ...s, ...patch };
+  });
+  if (changed) await saveHistory(next);
+  return { trades, changed, next };
+}
+
 // ─── HISTORY PAGE ─────────────────────────────────────────────────────────────
 function HistoryPage({ history, setHistory }) {
   const [filterAsset, setFilterAsset]     = useState("ALL");
@@ -7070,26 +7096,12 @@ function HistoryPage({ history, setHistory }) {
   const biasColor    = { BULLISH:"#22c55e", BEARISH:"#ef4444", NEUTRAL:"#f59e0b" };
 
   // ── Pull AlphaEdge's real MT5 trades and reconcile signal outcomes from them ──
+  // (Shares reconcileHistoryFromMT5 with the root-App poller; this page just
+  // refreshes more often and keeps the trades list for display.)
   const syncFromMT5 = useCallback(async () => {
-    const trades = await fetchMT5History(45);
+    const { trades, changed, next } = await reconcileHistoryFromMT5(45);
     setMt5Trades(trades);
-    if (trades.length) {
-      const cur = await loadHistory();
-      let changed = false;
-      const next = cur.map(s => {
-        const t = matchTradeToSignal(s, trades);
-        if (!t) return s;
-        const patch = { mt5Ticket: s.mt5Ticket || t.ticket, realizedUsd: t.profit, mt5State: t.state };
-        if (t.state === "closed") {
-          patch.outcome = t.profit >= 0 ? "win" : "loss";
-          if (t.close_time) patch.closedAt = t.close_time * 1000;   // for cooldown guardrail
-        }
-        const same = s.outcome===patch.outcome && s.realizedUsd===patch.realizedUsd && s.mt5State===patch.mt5State && String(s.mt5Ticket)===String(patch.mt5Ticket) && s.closedAt===patch.closedAt;
-        if (!same) changed = true;
-        return { ...s, ...patch };
-      });
-      if (changed) { await saveHistory(next); setHistory(next); }
-    }
+    if (changed && next) setHistory(next);
     setLastSync(Date.now());
   }, [setHistory]);
 
@@ -9097,6 +9109,22 @@ export default function AlphaEdge() {
   // Load history from storage on mount + purge expired
   useEffect(()=>{
     loadHistory().then(h=>setHistory(h));
+  },[]);
+
+  // App-wide MT5 outcome reconcile (every 60s) — keeps outcomes, cooldown
+  // guardrails and broker-realized stats current on EVERY page, not just when
+  // the History page happens to be open.
+  useEffect(()=>{
+    let alive = true;
+    const sync = async () => {
+      try {
+        const { changed, next } = await reconcileHistoryFromMT5(45);
+        if (alive && changed && next) setHistory(next);
+      } catch { /* bridge offline — retry next tick */ }
+    };
+    const t = setTimeout(sync, 8000);          // first pass after initial paint
+    const iv = setInterval(sync, 60000);
+    return () => { alive = false; clearTimeout(t); clearInterval(iv); };
   },[]);
 
   // Month-end Obsidian export (catch-up on load): writes any completed, not-yet-
