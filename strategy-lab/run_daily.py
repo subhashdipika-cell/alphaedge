@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import ctypes
 import os
 import subprocess
 import sys
@@ -17,6 +18,30 @@ import time
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+
+# ── Keep the laptop awake during the 9h collection ───────────────────────────
+# The 2026-07-08 run died at 06:40 because the machine entered Modern Standby
+# and the power source flipped. SetThreadExecutionState holds the system in the
+# working state so the collectors aren't suspended. (Task-level "stop on
+# battery" is fixed separately in install_scheduler.bat.)
+_ES_CONTINUOUS       = 0x80000000
+_ES_SYSTEM_REQUIRED  = 0x00000001
+_ES_AWAYMODE_REQUIRED = 0x00000040   # keep working state even under Modern Standby
+
+
+def keep_awake():
+    try:
+        ctypes.windll.kernel32.SetThreadExecutionState(
+            _ES_CONTINUOUS | _ES_SYSTEM_REQUIRED | _ES_AWAYMODE_REQUIRED)
+    except Exception:
+        pass
+
+
+def release_awake():
+    try:
+        ctypes.windll.kernel32.SetThreadExecutionState(_ES_CONTINUOUS)
+    except Exception:
+        pass
 
 # Smart App Control blocks the base Python 3.14 native wheels (pandas/MT5); the
 # 3.12 venv's wheels are trusted. If launched with any other interpreter (e.g. the
@@ -240,12 +265,18 @@ def main():
     log("=== Daily pipeline starting ===")
 
     if not args.analyse_only:
-        run_dhan_collector(days=args.dhan_days)
-        opt_proc = start_options_collector()        # parallel options-chain capture
+        keep_awake()                                 # hold the machine awake for the collect
+        log("Keep-awake ON — system held in working state during collection.")
         try:
-            run_collector(hours=args.collect_hours)
+            run_dhan_collector(days=args.dhan_days)
+            opt_proc = start_options_collector()     # parallel options-chain capture
+            try:
+                run_collector(hours=args.collect_hours)
+            finally:
+                stop_options_collector(opt_proc)
         finally:
-            stop_options_collector(opt_proc)
+            release_awake()
+            log("Keep-awake released.")
 
     results = run_analysis(max_dd=args.max_dd)
     save_wiki_summary(results, max_dd=args.max_dd)

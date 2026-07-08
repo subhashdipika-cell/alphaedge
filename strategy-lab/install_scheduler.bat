@@ -17,7 +17,10 @@ schtasks /create /tn "AlphaEdge-StrategyLab" ^
 
 :: Kill a stuck run after 11h so it can't block the next morning's 6:30 start,
 :: and allow it to start late if the PC was asleep at 6:30.
-powershell -NoProfile -Command "$s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hours 11) -StartWhenAvailable; Set-ScheduledTask -TaskName 'AlphaEdge-StrategyLab' -Settings $s | Out-Null"
+:: Power conditions matter: the 2026-07-08 run died at 06:40 because the default
+:: task settings STOP the task when the laptop switches to battery. AllowStart +
+:: DontStop keep it running on battery; run_daily.py also holds the machine awake.
+powershell -NoProfile -Command "$s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hours 11) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries; Set-ScheduledTask -TaskName 'AlphaEdge-StrategyLab' -Settings $s | Out-Null"
 
 if %errorlevel%==0 (
     echo.
