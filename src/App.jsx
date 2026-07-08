@@ -441,6 +441,10 @@ function buildMonthlyMarkdown(month, records) {
     + `mt5_trades: ${mt5.length}\n`
     + `mt5_win_rate: ${mt5Wr == null ? "" : mt5Wr.toFixed(1)}\n`
     + `mt5_net_usd: ${mt5Net.toFixed(2)}\n`
+    // net_usd: unified cross-app money field for the vault dashboard — the
+    // broker-realized USD net (same as mt5_net_usd; net_r above stays as the
+    // theoretical R figure).
+    + `net_usd: ${mt5Net.toFixed(2)}\n`
     + `tags:\n  - ${OBSIDIAN_APP}\n  - monthly\n  - trades\n  - ${month}\n`
     + `---\n\n`;
   md += `# AlphaEdge — ${monthName} ${yr} Trade Summary\n\n`;
