@@ -664,6 +664,65 @@ class Retest_Breakout_Swing(Retest_Breakout):
                          min_gap=0.003, rsi_period=14)
 
 
+class ORB_Session_Breakout(Strategy):
+    """2-hour opening-range breakout, held overnight (STBT).
+
+    Source: face-to-face interview with a systematic NSE options seller
+    (Jul 2026). His positional leg: mark the 09:15-11:15 range; a break above
+    the high is bullish (he sells an ITM put), a break below is bearish (sells
+    an ITM call); SL 0.5% ON THE UNDERLYING; exit next morning ~09:35. The
+    options wrapper is TradingBrain's job (TB009) - here we test the
+    directional core on futures/CFD data: BUY the first close above the range
+    high / SELL the first close below the low, SL 0.5% of entry, no profit
+    target (tp parked 10R away) so the exit is the 0.5% stop or the engine's
+    time exit. One trade per day, first breakout only (his once-only re-entry
+    is deliberately dropped - it doubles the day's risk for an unproven add).
+
+    For 24h symbols (gold/crypto) the "session open" is the data day's first
+    bar, so the range is the first 2 hours after midnight server time - a
+    weaker anchor than a cash-market open; judge those results accordingly.
+    """
+    name      = "ORB_2H_Breakout"
+    timeframe = "M5"
+    category  = "swing"
+    rr_ratio  = 1.0   # unused: no profit target, exit = stop or time exit
+
+    def __init__(self, range_bars=24, sl_pct=0.005):
+        self.range_bars = range_bars   # 24 x M5 = the 2-hour opening range
+        self.sl_pct     = sl_pct
+
+    def signals(self, candles):
+        # Day boundaries from the timestamp's date part.
+        starts, cur_day = [], None
+        for i, c in enumerate(candles):
+            d = c["time"][:10]
+            if d != cur_day:
+                starts.append(i)
+                cur_day = d
+        starts.append(len(candles))
+
+        sigs = []
+        for k in range(len(starts) - 1):
+            s, e = starts[k], starts[k + 1]
+            if e - s <= self.range_bars + 1:
+                continue  # short/holiday session: no room to trade the range
+            hi = max(c["high"] for c in candles[s:s + self.range_bars])
+            lo = min(c["low"] for c in candles[s:s + self.range_bars])
+            for j in range(s + self.range_bars, e):
+                c = candles[j]["close"]
+                if c > hi:
+                    sl = c * (1 - self.sl_pct)
+                    sigs.append({"idx": j, "side": "BUY", "entry": c,
+                                 "sl": sl, "tp": c + (c - sl) * 10})
+                    break
+                if c < lo:
+                    sl = c * (1 + self.sl_pct)
+                    sigs.append({"idx": j, "side": "SELL", "entry": c,
+                                 "sl": sl, "tp": c - (sl - c) * 10})
+                    break
+        return sigs
+
+
 # ── ML Trader (kernel-regression MLMA confluence) ───────────────────────────────
 # Python port of the tradable core of the "[Quadapt] Machine Learning Trader"
 # TradingView indicator. The full indicator is a discretionary context aggregator;
@@ -1178,6 +1237,7 @@ SYMBOL_STRATEGIES = {
         (EMA_Pullback_Swing(),        "H1"),
         (RSI_Divergence_Swing(),      "H1"),
         (Retest_Breakout_Swing(),     "H1"),
+        (ORB_Session_Breakout(),      "M5"),
         (ML_Trader_Confluence(kernel="Matern", regressor="GPR"),       "M5"),  # XAUUSD+
         (ML_Trader_Confluence_Swing(kernel="Matern", regressor="GPR"), "H1"),
     ],
@@ -1192,6 +1252,7 @@ SYMBOL_STRATEGIES = {
         (EMA_Pullback_Swing(),        "H1"),
         (RSI_Divergence_Swing(),      "H1"),
         (Retest_Breakout_Swing(),     "H1"),
+        (ORB_Session_Breakout(),      "M5"),
         (ML_Trader_Confluence(kernel="Laplacian", regressor="SVR"),       "M5"),  # BTCUSD
         (ML_Trader_Confluence_Swing(kernel="Laplacian", regressor="SVR"), "H1"),
     ],
@@ -1206,6 +1267,7 @@ SYMBOL_STRATEGIES = {
         (EMA_Pullback_Swing(),        "H1"),
         (RSI_Divergence_Swing(),      "H1"),
         (Retest_Breakout_Swing(),     "H1"),
+        (ORB_Session_Breakout(),      "M5"),
         (ML_Trader_Confluence(kernel="Laplacian", regressor="SVR"),       "M5"),  # ETHUSD
         (ML_Trader_Confluence_Swing(kernel="Laplacian", regressor="SVR"), "H1"),
     ],
@@ -1222,6 +1284,7 @@ SYMBOL_STRATEGIES = {
         (EMA_Pullback_Swing(),        "H1"),
         (RSI_Divergence_Swing(),      "H1"),
         (Retest_Breakout_Swing(),     "H1"),
+        (ORB_Session_Breakout(),      "M5"),
         (ML_Trader_Confluence(kernel="RBF", regressor="KRR"),       "M5"),  # NIFTY50
         (ML_Trader_Confluence_Swing(kernel="RBF", regressor="KRR"), "H1"),
     ],
@@ -1236,6 +1299,7 @@ SYMBOL_STRATEGIES = {
         (EMA_Pullback_Swing(),        "H1"),
         (RSI_Divergence_Swing(),      "H1"),
         (Retest_Breakout_Swing(),     "H1"),
+        (ORB_Session_Breakout(),      "M5"),
         (ML_Trader_Confluence(kernel="RBF", regressor="KRR"),       "M5"),  # BANKNIFTY
         (ML_Trader_Confluence_Swing(kernel="RBF", regressor="KRR"), "H1"),
     ],
@@ -1250,6 +1314,7 @@ SYMBOL_STRATEGIES = {
         (EMA_Pullback_Swing(),        "H1"),
         (RSI_Divergence_Swing(),      "H1"),
         (Retest_Breakout_Swing(),     "H1"),
+        (ORB_Session_Breakout(),      "M5"),
         (ML_Trader_Confluence(kernel="RBF", regressor="KRR"),       "M5"),  # SENSEX
         (ML_Trader_Confluence_Swing(kernel="RBF", regressor="KRR"), "H1"),
     ],
