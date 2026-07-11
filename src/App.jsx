@@ -7082,6 +7082,76 @@ async function reconcileHistoryFromMT5(days = 45) {
   return { trades, changed, next };
 }
 
+// ─── PRICE-BASED AUTO-RESOLVER (non-MT5 signals: NSE indices) ─────────────────
+// Nifty/NSE signals never reach MT5 (Vantage carries no NSE instruments and the
+// Dhan subscription is data-only), so their outcomes sat "pending" forever
+// unless hand-marked — the June 2026 monthly export had all 10 Nifty signals
+// PENDING. This resolves them from the live quote instead:
+//   BULLISH: price <= SL -> loss · price >= TP1 -> win
+//   BEARISH: price >= SL -> loss · price <= TP1 -> win
+// SL is checked FIRST, so an ambiguous snapshot resolves AGAINST the trade
+// (conservative). Snapshot-based by nature: a spike that touched SL/TP between
+// 60s polls is invisible, so outcomes are approximate — every auto resolution
+// is stamped resolvedBy/resolvedAt/resolvedPrice for auditability, and a manual
+// updateOutcome can still override. Signals carrying an MT5 ticket/state are
+// never touched (the terminal is their source of truth). Deliberately does NOT
+// set closedAt: the post-loss cooldown guardrail keys on closedAt, and a paper
+// Nifty SL must not block real MT5 entries (manual marks behave the same way).
+// Pending signals that never reach either level expire after their horizon so
+// they stop clogging the stats ("expired" is excluded from win-rate/learning).
+const AUTO_RESOLVE_TTL_MS = {
+  Scalping: 24 * 3600 * 1000,
+  Intraday: 24 * 3600 * 1000,
+  Swing: 7 * 24 * 3600 * 1000,
+};
+
+async function autoResolveFromPrice() {
+  const prices = await fetchMT5Prices(); // bridge /price — includes Dhan NSE quotes
+  const cur = await loadHistory();
+  const now = Date.now();
+  let changed = false;
+  const next = cur.map(s => {
+    if ((s.outcome || "pending") !== "pending") return s;
+    if (s.mt5Ticket || s.mt5State) return s; // MT5 owns these outcomes
+
+    const dirUp = s.bias === "BULLISH";
+    const dirDn = s.bias === "BEARISH";
+    const sl = Number(s.stopLoss);
+    const tp = Number(s.takeProfit1);
+    const quote = prices?.[s.assetId];
+    const px = Number(quote && typeof quote === "object" ? quote.price : quote);
+
+    if ((dirUp || dirDn) && isFinite(px) && px > 0 && isFinite(sl) && isFinite(tp)) {
+      const slHit = dirUp ? px <= sl : px >= sl;
+      const tpHit = dirUp ? px >= tp : px <= tp;
+      if (slHit || tpHit) {
+        changed = true;
+        return {
+          ...s,
+          outcome: slHit ? "loss" : "win", // SL first: ambiguity resolves against us
+          resolvedBy: "auto-price",
+          resolvedAt: now,
+          resolvedPrice: px,
+        };
+      }
+    }
+
+    const ttl = AUTO_RESOLVE_TTL_MS[s.nature] || AUTO_RESOLVE_TTL_MS.Intraday;
+    if (s.timestamp && now - s.timestamp > ttl) {
+      changed = true;
+      return { ...s, outcome: "expired", resolvedBy: "auto-expiry", resolvedAt: now };
+    }
+    return s;
+  });
+  if (changed) {
+    await saveHistory(next);
+    // Same retrain hook as a manual outcome mark — resolved results feed the
+    // signal-learning profile ("expired" is excluded by isResolvedSignal).
+    try { saveSignalLearning(next); } catch { /* ignore */ }
+  }
+  return { changed, next };
+}
+
 // ─── HISTORY PAGE ─────────────────────────────────────────────────────────────
 function HistoryPage({ history, setHistory }) {
   const [filterAsset, setFilterAsset]     = useState("ALL");
@@ -9125,6 +9195,12 @@ export default function AlphaEdge() {
         const { changed, next } = await reconcileHistoryFromMT5(45);
         if (alive && changed && next) setHistory(next);
       } catch { /* bridge offline — retry next tick */ }
+      // Price-based resolver for signals MT5 never sees (NSE indices) — runs
+      // AFTER the MT5 reconcile so terminal-sourced patches always land first.
+      try {
+        const { changed, next } = await autoResolveFromPrice();
+        if (alive && changed && next) setHistory(next);
+      } catch { /* price source offline — retry next tick */ }
     };
     const t = setTimeout(sync, 8000);          // first pass after initial paint
     const iv = setInterval(sync, 60000);
