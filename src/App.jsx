@@ -7114,6 +7114,17 @@ async function autoResolveFromPrice() {
     if ((s.outcome || "pending") !== "pending") return s;
     if (s.mt5Ticket || s.mt5State) return s; // MT5 owns these outcomes
 
+    // Expiry takes PRECEDENCE over price: a signal past its horizon must not
+    // be scored against today's quote — price has wandered for days and a
+    // TP/SL "touch" now says nothing about what happened in-horizon. This is
+    // what keeps the stale pending backlog honest: it expires, it doesn't
+    // get retro-scored.
+    const ttl = AUTO_RESOLVE_TTL_MS[s.nature] || AUTO_RESOLVE_TTL_MS.Intraday;
+    if (s.timestamp && now - s.timestamp > ttl) {
+      changed = true;
+      return { ...s, outcome: "expired", resolvedBy: "auto-expiry", resolvedAt: now };
+    }
+
     const dirUp = s.bias === "BULLISH";
     const dirDn = s.bias === "BEARISH";
     const sl = Number(s.stopLoss);
@@ -7134,12 +7145,6 @@ async function autoResolveFromPrice() {
           resolvedPrice: px,
         };
       }
-    }
-
-    const ttl = AUTO_RESOLVE_TTL_MS[s.nature] || AUTO_RESOLVE_TTL_MS.Intraday;
-    if (s.timestamp && now - s.timestamp > ttl) {
-      changed = true;
-      return { ...s, outcome: "expired", resolvedBy: "auto-expiry", resolvedAt: now };
     }
     return s;
   });
