@@ -645,6 +645,19 @@ def fetch_lot_sizes():
 # ─── INDIA VIX ─────────────────────────────────────────────────────────────────
 # Live India VIX (Dhan IDX_I security 21) with a collected-ATM-IV percentile
 # proxy as fallback so the score engine can still reason about vol off-hours.
+def rd_replay():
+    """Serve the latest options-premium score replay (scripts/replay.mjs output)
+    for the R&D page. Read-only — the browser can't touch strategy-lab/results."""
+    fp = pathlib.Path(__file__).parent.parent / "strategy-lab" / "results" / "replay_latest.json"
+    try:
+        if not fp.exists():
+            return {"ok": False, "error": "no replay yet — run: node scripts/replay.mjs"}
+        data = json.loads(fp.read_text(encoding="utf-8"))
+        return {"ok": True, **data}
+    except Exception as e:
+        return {"ok": False, "error": f"replay read failed: {e}"}
+
+
 def dhan_vix():
     quotes = dhan_index_quotes()
     vix = quotes.get("INDIAVIX") or {}
@@ -696,6 +709,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, fetch_lot_sizes())
         elif parsed.path.startswith("/dhan/vix"):
             self._send(200, dhan_vix())
+        elif parsed.path.startswith("/rd/replay"):
+            self._send(200, rd_replay())
         elif parsed.path.startswith("/market/holiday"):
             today = _ist_day()
             hols = indian_holidays()

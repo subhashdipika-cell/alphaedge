@@ -41,6 +41,7 @@ import {
 import OiPulsePage from "./pages/OiPulse.jsx";
 import OptionScorePage from "./pages/OptionScore.jsx";
 import PaperTradesPage from "./pages/PaperTrades.jsx";
+import RnDPage from "./pages/RnD.jsx";
 import { isOptionPaperTrade } from "./engines/resolve.js";
 import { resolveOpenPaperTrades } from "./state/paperTrades.js";
 
@@ -7327,6 +7328,8 @@ export default function AlphaEdge() {
 
     <PaperTradesPage key="paper"/>,
 
+    <RnDPage key="rnd"/>,
+
     <AISignalPage key="ai"
       onSignalSaved={handleSignalSaved}
       prices={prices}/>,
@@ -7345,8 +7348,6 @@ export default function AlphaEdge() {
     <MTFConfluencePage key="mtf" candles={candles} prices={prices}/>,
 
     <JournalPage key="journal"/>,
-
-    <AnalyticsPage key="analytics" candles={candles} prices={prices} history={history}/>,
 
     <OptionsDeskPage key="options"/>,
 
@@ -7382,11 +7383,11 @@ export default function AlphaEdge() {
         {/* Nav items */}
         {sideItems.map((s,i)=>{
           const isActive = page===i;
-          // Badges: Alerts(6)=live price alerts, History(7)=pending, Calendar(9)=high-impact events
+          // Badges: Alerts(7)=live price alerts, History(8)=pending, Calendar(10)=high-impact events
           const priceAlertCount = [prices.NIFTY50, prices.BANKNIFTY, prices.SENSEX, prices.FINNIFTY].filter(Boolean).length;
-          const badge = i===6 ? priceAlertCount
-            : i===7 && pendingCount>0 ? pendingCount
-            : i===9 ? getEconEvents().filter(e=>e.impact==="high"&&!e.actual&&new Date(e.datetime).getTime()>=Date.now()).length
+          const badge = i===7 ? priceAlertCount
+            : i===8 && pendingCount>0 ? pendingCount
+            : i===10 ? getEconEvents().filter(e=>e.impact==="high"&&!e.actual&&new Date(e.datetime).getTime()>=Date.now()).length
             : 0;
           return (
             <div key={s.label} onClick={()=>setPage(i)}
@@ -7480,8 +7481,8 @@ export default function AlphaEdge() {
           <div style={{flex:1}}/>
 
           {/* History quick-stat in header when on other pages */}
-          {page!==7 && history.length>0 && (
-            <span onClick={()=>setPage(7)}
+          {page!==8 && history.length>0 && (
+            <span onClick={()=>setPage(8)}
               style={{fontSize:9,color:"#a78bfa",background:"#1e1040",padding:"3px 8px",borderRadius:5,
                 border:"0.5px solid #7c3aed40",cursor:"pointer",letterSpacing:"0.04em"}}>
               ◷ {history.length} signals · {pendingCount} pending

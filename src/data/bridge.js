@@ -224,6 +224,17 @@ export async function fetchOptionChain(underlying, range = 6) {
   } catch (e) { return { ok:false, error:String(e) }; }
 }
 
+// Latest options-premium score replay (scripts/replay.mjs output) for R&D.
+// Returns {ok, summary, trades[]} or {ok:false, error}.
+export async function fetchReplay() {
+  const base = bridgeBaseUrl();
+  if (!base) return { ok: false, error: "no bridge URL" };
+  try {
+    const r = await fetch(base + "/rd/replay", { signal: AbortSignal.timeout(10000) });
+    return await r.json();
+  } catch (e) { return { ok: false, error: String(e) }; }
+}
+
 // India VIX (live via Dhan, or a collected-ATM-IV percentile proxy off-hours).
 // Returns the bridge payload {ok, source:"dhan"|"proxy", vix?, proxy} or null.
 export async function fetchVix() {
