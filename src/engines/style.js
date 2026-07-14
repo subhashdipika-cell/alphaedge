@@ -46,21 +46,26 @@ export const STYLE_HOLD = {
 };
 
 // Rule-based style selector. Returns { style, reasons[], alternatives[] }.
-export function selectStyle({ regime, vix, dteYears, atNow = null } = {}) {
+// ivp = ATM IV percentile (0–100): cheap IV favours swing (Vega tailwind); bloated
+// IV is buyer-hostile for holds, so restrict to scalps that exit before IV moves.
+export function selectStyle({ regime, vix, dteYears, ivp = null, atNow = null } = {}) {
   const ist = atNow ? new Date(atNow) : nowIST();
   const mins = ist.getHours() * 60 + ist.getMinutes();
   const vl = vix?.vix?.ltp ?? null;
   const dteDays = (dteYears ?? (1 / 365)) * 365;
   const reasons = [];
 
-  // Expiry day, high VIX, or an imminent event ⇒ scalp (fast, gamma-driven).
+  // Expiry day, high VIX, bloated IV, or an imminent event ⇒ scalp (fast, gamma-driven,
+  // exits before IV crush).
   if (regime?.regime === "EXPIRY") { reasons.push("Expiry day — 0-DTE gamma favours fast scalps only"); return pick("SCALP", reasons); }
   if (vl != null && vl >= 20)      { reasons.push(`VIX ${vl.toFixed(1)} elevated — volatility scalps, avoid holding`); return pick("SCALP", reasons); }
+  if (ivp != null && ivp >= 80)    { reasons.push(`IV ${ivp}th pct — options bloated; scalp only, no swing (IV-crush risk)`); return pick("SCALP", reasons, ["INTRADAY"]); }
   if (regime?.regime === "BREAKOUT") { reasons.push("Volatility breakout — momentum scalp window"); return pick("SCALP", reasons, ["INTRADAY"]); }
 
-  // Calm + multi-day expiry + a real trend ⇒ swing (theta-tolerant, ITM).
-  if (dteDays >= 3 && (vl == null || vl < 14) && regime?.favorable && (regime?.regime === "TREND_BULL" || regime?.regime === "TREND_BEAR")) {
-    reasons.push(`Low VIX + ${Math.round(dteDays)}d to expiry + a clean trend — positional swing (ITM, theta-tolerant)`);
+  // Cheap IV + multi-day expiry + a real trend ⇒ swing (Vega tailwind, theta-tolerant, ITM).
+  const cheapIv = (ivp != null && ivp < 20) || (ivp == null && (vl == null || vl < 14));
+  if (dteDays >= 3 && cheapIv && regime?.favorable && (regime?.regime === "TREND_BULL" || regime?.regime === "TREND_BEAR")) {
+    reasons.push(`${ivp != null ? `IV ${ivp}th pct (cheap)` : "Low VIX"} + ${Math.round(dteDays)}d to expiry + a clean trend — positional swing (ITM, Vega tailwind)`);
     return pick("SWING", reasons, ["INTRADAY"]);
   }
 

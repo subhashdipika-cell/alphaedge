@@ -167,6 +167,29 @@ export function calcATR(candles, period = 14) {
   return out;
 }
 
+// Rolling VWAP over the last `period` bars (anchored intraday proxy). Uses the
+// typical price (H+L+C)/3 weighted by volume. Returns { vwap, slope } where
+// `vwap` is the latest value and `slope` is its % change over ~6 bars. Falls back
+// to a simple MA when volume is absent.
+export function calcVWAP(candles, period = 75) {
+  if (!candles || candles.length < 5) return { vwap: candles?.at(-1)?.close || 0, slope: 0, series: [] };
+  const n = candles.length;
+  const start = Math.max(0, n - period);
+  const series = new Array(n).fill(0);
+  let cumPV = 0, cumV = 0;
+  for (let i = start; i < n; i++) {
+    const c = candles[i];
+    const tp = (c.high + c.low + c.close) / 3;
+    const v = (c.vol || 0) > 0 ? c.vol : 1;   // equal-weight when volume missing
+    cumPV += tp * v; cumV += v;
+    series[i] = cumV ? cumPV / cumV : c.close;
+  }
+  const vwap = series[n - 1];
+  const prev = series[Math.max(start, n - 7)] || vwap;
+  const slope = prev ? ((vwap - prev) / prev) * 100 : 0;
+  return { vwap, slope, series };
+}
+
 // ADX / +DI / -DI (Wilder). Returns { adx, plusDI, minusDI } series.
 export function calcADX(candles, period = 14) {
   const n = candles.length;

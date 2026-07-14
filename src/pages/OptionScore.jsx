@@ -243,7 +243,7 @@ export default function OptionScorePage({ onPaperTrade }) {
                     <span style={{ fontSize: 10, color: C.faint }}>{result.strike.moneyness} · exp {result.strike.expiry?.slice(5)}</span>
                   </div>
                   <div style={{ marginTop: 6, fontSize: 11, fontFamily: "monospace", color: C.ink }}>₹{fmt(result.strike.ltp)} <span style={{ color: C.faint, fontSize: 9 }}>premium</span></div>
-                  <div style={{ marginTop: 2, fontSize: 9, color: C.dim, fontFamily: "monospace" }}>Δ {fmt(result.strike.delta)} · θ {fmt(result.strike.theta, 1)}/day · IV {fmt(result.strike.iv)}</div>
+                  <div style={{ marginTop: 2, fontSize: 9, color: C.dim, fontFamily: "monospace" }}>Δ {fmt(result.strike.delta)} · θ {fmt(result.strike.theta, 1)}/day · IV {fmt(result.strike.iv)}{result.strike.spreadPct != null ? ` · spread ${fmt(result.strike.spreadPct)}%` : ""}</div>
                   {result.expectedMove && <div style={{ marginTop: 6, fontSize: 9, color: C.amber }}>Expected move ≈ {fmt(result.expectedMove.points, 0)} pts ({fmt(result.expectedMove.pct)}%) by expiry</div>}
                   <div style={{ marginTop: 6 }}>{(result.strike.reasons || []).map((r, i) => <div key={i} style={{ fontSize: 9, color: C.faint, lineHeight: 1.5 }}>• {r}</div>)}</div>
                 </Card>

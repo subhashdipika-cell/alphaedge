@@ -23,6 +23,14 @@ describe("selectStyle", () => {
     expect(r.reasons.length).toBeGreaterThan(0);
     expect(STYLES[r.style]).toBeTruthy();
   });
+  it("restricts to SCALP when IV is bloated (IVP>=80)", () => {
+    const r = selectStyle({ regime: { regime: "TREND_BULL", favorable: true }, vix: { vix: { ltp: 13 } }, dteYears: 20 / 365, ivp: 88 });
+    expect(r.style).toBe("SCALP");
+  });
+  it("favors SWING when IV is cheap (IVP<20) on a calm multi-day trend", () => {
+    const r = selectStyle({ regime: { regime: "TREND_BULL", favorable: true }, vix: { vix: { ltp: 16 } }, dteYears: 20 / 365, ivp: 12, atNow: new Date("2026-07-14T05:00:00Z") });
+    expect(r.style).toBe("SWING");
+  });
 });
 
 describe("styleWeights", () => {

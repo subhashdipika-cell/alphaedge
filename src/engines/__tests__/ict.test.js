@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   detectSwings, detectFVGs, detectOrderBlocks, detectBOS,
-  detectLiquidity, detectMSLabels, detectPD, calcEMAs, calcRSI,
+  detectLiquidity, detectMSLabels, detectPD, calcEMAs, calcRSI, calcVWAP,
 } from "../ict.js";
 
 // Build a candle in the app's shape from OHLC.
@@ -120,5 +120,20 @@ describe("calcRSI", () => {
     const rDown = calcRSI(down);
     expect(rUp[rUp.length - 1]).toBeGreaterThan(95);
     expect(rDown[rDown.length - 1]).toBeLessThan(5);
+  });
+});
+
+describe("calcVWAP", () => {
+  it("sits within the price range and slopes up on a rising series", () => {
+    const up = Array.from({ length: 80 }, (_, i) => ({ ...c(100 + i, 101 + i, 99 + i, 100 + i), vol: 1000 }));
+    const { vwap, slope } = calcVWAP(up);
+    expect(vwap).toBeGreaterThan(100);
+    expect(vwap).toBeLessThan(up.at(-1).close);   // lags the rising price
+    expect(slope).toBeGreaterThan(0);
+  });
+  it("falls back gracefully with no volume", () => {
+    const flat = Array.from({ length: 10 }, () => c(100, 101, 99, 100));
+    const { vwap } = calcVWAP(flat);
+    expect(vwap).toBeCloseTo(100, 0);
   });
 });

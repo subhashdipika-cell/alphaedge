@@ -245,7 +245,8 @@ def _optionchain_from_csv(under_name, rng):
             sk = float(r.get("strike") or 0)
             leg = {"ltp": float(r.get("ltp") or 0), "oi": float(r.get("oi") or 0),
                    "iv": round(float(r.get("iv") or 0), 2), "delta": round(float(r.get("delta") or 0), 3),
-                   "theta": round(float(r.get("theta") or 0), 2)}
+                   "theta": round(float(r.get("theta") or 0), 2),
+                   "bid": round(float(r.get("bid") or 0), 2), "ask": round(float(r.get("ask") or 0), 2)}
             by_strike.setdefault(sk, {})[r.get("type", "").lower()] = leg
         sks = sorted(by_strike.keys())
         if not sks or not under:
@@ -333,7 +334,9 @@ def dhan_optionchain(req):
                 return {"ltp": x.get("last_price", 0), "oi": x.get("oi", 0),
                         "iv": round(float(x.get("implied_volatility") or 0), 2),
                         "delta": round(float(g.get("delta") or 0), 3),
-                        "theta": round(float(g.get("theta") or 0), 2)}
+                        "theta": round(float(g.get("theta") or 0), 2),
+                        "bid": round(float(x.get("top_bid_price") or x.get("bid_price") or 0), 2),
+                        "ask": round(float(x.get("top_ask_price") or x.get("ask_price") or 0), 2)}
             rows.append({"strike": round(float(sk), 2), "atm": float(sk) == floats[atm_i],
                          "ce": leg("ce"), "pe": leg("pe")})
         atm_ce_iv = next((r["ce"]["iv"] for r in rows if r["atm"]), 0)

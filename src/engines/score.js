@@ -7,7 +7,7 @@
 //
 // Pure: scoreOption(inputs) → result. Data gathering happens in the page/scanner.
 
-import { detectSwings, detectBOS, detectOrderBlocks, detectFVGs, detectLiquidity, detectMSLabels, detectPD, calcEMAs, calcRSI, calcATR } from "./ict.js";
+import { detectSwings, detectBOS, detectOrderBlocks, detectFVGs, detectLiquidity, detectMSLabels, detectPD, calcEMAs, calcRSI, calcATR, calcVWAP } from "./ict.js";
 import { detectRegime } from "./regime.js";
 import { expectedMove, selectStrike, optionsTradePlan } from "./strike.js";
 import { evaluateGuardrails, marketSession } from "./guardrails.js";
@@ -84,17 +84,25 @@ function factorMomentum(dir, w, { candles5m }) {
   const reasons = [];
   let pts = 0;
   const rsi = calcRSI(candles5m).at(-1);
-  if (bull ? (rsi >= 55 && rsi <= 72) : (rsi >= 28 && rsi <= 45)) { pts += 5; reasons.push(`RSI ${rsi.toFixed(0)} in the directional band`); }
-  else if (bull ? rsi > 72 : rsi < 28) { pts += 2.5; reasons.push(`RSI ${rsi.toFixed(0)} — overextended`); }
+  if (bull ? (rsi >= 55 && rsi <= 72) : (rsi >= 28 && rsi <= 45)) { pts += 4; reasons.push(`RSI ${rsi.toFixed(0)} in the directional band`); }
+  else if (bull ? rsi > 72 : rsi < 28) { pts += 2; reasons.push(`RSI ${rsi.toFixed(0)} — overextended`); }
   const atr = calcATR(candles5m).at(-1) || 1;
   const push = candles5m.at(-1).close - candles5m[Math.max(0, candles5m.length - 11)].close;
-  if ((bull ? push : -push) >= atr) { pts += 5; reasons.push(`10-bar push ≥ 1 ATR (${(push / atr).toFixed(1)}×)`); }
-  else if ((bull ? push : -push) >= atr * 0.5) { pts += 2.5; }
+  if ((bull ? push : -push) >= atr) { pts += 4; reasons.push(`10-bar push ≥ 1 ATR (${(push / atr).toFixed(1)}×)`); }
+  else if ((bull ? push : -push) >= atr * 0.5) { pts += 2; }
+  // VWAP alignment: price on the right side of VWAP with VWAP sloping in-direction.
+  const { vwap, slope } = calcVWAP(candles5m);
+  const px = candles5m.at(-1).close;
+  if (vwap > 0) {
+    const above = px > vwap, slopeOk = bull ? slope > 0.01 : slope < -0.01;
+    if ((bull ? above : !above) && slopeOk) { pts += 3; reasons.push(`Price ${bull ? "above" : "below"} VWAP with VWAP sloping ${bull ? "up" : "down"}`); }
+    else if (bull ? above : !above) { pts += 1.5; reasons.push(`Price ${bull ? "above" : "below"} VWAP (slope flat)`); }
+  }
   // MACD-lite: EMA12-EMA26 gap widening
   const ema = (p) => { const k = 2 / (p + 1); let r = candles5m[0].close; return candles5m.map(c => (r = c.close * k + r * (1 - k))); };
   const e12 = ema(12), e26 = ema(26);
   const gapNow = e12.at(-1) - e26.at(-1), gapPrev = e12.at(-4) - e26.at(-4);
-  if ((bull && gapNow > gapPrev && gapNow > 0) || (!bull && gapNow < gapPrev && gapNow < 0)) { pts += 3; reasons.push("MACD-lite gap widening in direction"); }
+  if ((bull && gapNow > gapPrev && gapNow > 0) || (!bull && gapNow < gapPrev && gapNow < 0)) { pts += 2; reasons.push("MACD-lite gap widening in direction"); }
   // Volume expansion vs 20-bar mean
   const vols = candles5m.slice(-20).map(c => c.vol || 0);
   const vMean = vols.reduce((a, b) => a + b, 0) / (vols.length || 1);
@@ -172,8 +180,11 @@ function factorGreeks(dir, w, { leg, spot, dteYears, strikePref }) {
   else if (thetaBurden <= 10) { pts += 1.5; reasons.push(`Theta burden ${thetaBurden.toFixed(1)}%/day — moderate`); }
   else reasons.push(`Theta burden ${thetaBurden.toFixed(1)}%/day — high`);
   if (leg.atm || Math.abs((leg.strike || 0) - (spot || 0)) <= (spot || 0) * 0.003) { pts += 2; reasons.push("Within ±1 strike of ATM (buyer's gamma zone)"); }
-  // Vega sanity (short-dated + reasonable IV)
-  if ((dteYears ?? 1) < 0.06 || (leg.iv || 0) < 60) { pts += 1; }
+  // Liquidity: tight bid-ask spread keeps slippage from eating the edge.
+  const spPct = leg.spreadPct != null ? leg.spreadPct * 100 : null;
+  if (spPct == null) { /* no depth data — neutral */ }
+  else if (spPct <= 0.5) { pts += 1; reasons.push(`Tight spread (${spPct.toFixed(2)}% of premium) — low slippage`); }
+  else if (spPct > 1.5) { reasons.push(`⚠ Wide spread (${spPct.toFixed(2)}%) — illiquid, slippage risk`); }
   return F(w, pts, reasons);
 }
 
@@ -250,7 +261,7 @@ export function scoreOption(inputs) {
   // preference + hold. Caller may force a style via inputs.style.
   const styleSel = inputs.style
     ? { style: inputs.style, label: STYLE_STRIKE[inputs.style] ? inputs.style : inputs.style, reasons: ["Manual style override"], alternatives: [] }
-    : selectStyle({ regime, vix, dteYears });
+    : selectStyle({ regime, vix, dteYears, ivp: chain?.ivPercentile ?? null });
   const style = styleSel.style;
   const strikePref = STYLE_STRIKE[style] || STYLE_STRIKE.INTRADAY;
   const hold = STYLE_HOLD[style] || STYLE_HOLD.INTRADAY;
@@ -330,6 +341,7 @@ export function scoreOption(inputs) {
     regime, style: styleInfo, factors, weights,
     strike: chosenLeg ? { strike: chosenLeg.strike, moneyness: pick?.moneyness, ltp: chosenLeg.ltp,
                           delta: chosenLeg.delta, theta: chosenLeg.theta, iv: chosenLeg.iv,
+                          spreadPct: chosenLeg.spreadPct != null ? +(chosenLeg.spreadPct * 100).toFixed(2) : null,
                           expiry: chain?.expiry, reasons: pick?.reasons || [] } : null,
     expectedMove: em, plan, report,
     ts: Date.now(),
