@@ -1,16 +1,13 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { createChart, CandlestickSeries } from "lightweight-charts";
-
-// ─── CONSTANTS ────────────────────────────────────────────────────────────────
-const ASSETS = [
-  { id: "NIFTY50",   label: "Nifty 50",   base: 25500, type: "index", exchange: "NSE" },
-  { id: "BANKNIFTY", label: "Bank Nifty", base: 57500, type: "index", exchange: "NSE" },
-  { id: "SENSEX",    label: "Sensex",     base: 83500, type: "index", exchange: "BSE" },
-  { id: "FINNIFTY",  label: "Fin Nifty",  base: 27200, type: "index", exchange: "NSE" },
-];
-
-const PAGES = ["Dashboard","AI Signal","Backtest","Execution","Alerts","History","Money Mgt.","Calendar","MTF Confluence","Journal","Analytics","Options","Settings"];
-const PAGE_ICONS = ["▣","◈","⟳","⚡","◉","◷","⚑","◫","◐","✎","◑","⊗","⚙"];
+import {
+  ASSETS, PAGES, PAGE_ICONS, CAT_COLOR,
+  TV_SYMBOLS, TV_TF_MAP, DHAN_CHART_ASSETS,
+  DHAN_INSTRUMENTS, DHAN_TF_INTERVAL, DHAN_TF_DAYS,
+  LOT_SIZE_DEFAULTS, APP_TO_DHAN, YAHOO_INDEX, DEFAULT_BRIDGE_URL,
+} from "./data/constants.js";
+import { IST_SHIFT_MS, nowIST, istDayKey, isIndianMarketOpen } from "./lib/ist.js";
+import { emaSeries, aggregateCandles } from "./lib/math.js";
 
 // ─── STORAGE HELPERS (30-day persistent signal history) ───────────────────────
 const HISTORY_KEY = "signal-history";
@@ -353,7 +350,6 @@ const OBSIDIAN_EXPORT_KEY = "alphaedge_obsidian_exported";  // months already wr
 
 // IST = UTC + 5:30. Shift the instant by +330 min and read UTC fields, so the
 // result is IST wall-clock regardless of the machine's own timezone.
-const IST_SHIFT_MS = 330 * 60000;
 // "YYYY-MM" for a timestamp, in IST (the app's reference zone).
 function istMonthKey(ts) {
   const i = new Date(Number(ts) + IST_SHIFT_MS);
@@ -664,7 +660,6 @@ const STRATEGIES = [
 ];
 
 
-const CAT_COLOR = { ICT:"#f59e0b", SMC:"#06b6d4", Classic:"#a78bfa", Macro:"#34d399" };
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 // ─── AI PROVIDER SYSTEM ───────────────────────────────────────────────────────
@@ -864,8 +859,6 @@ async function sendTradeAlert(event, t) {
 // AlphaEdge is decision-support + paper trading only: no orders are ever sent
 // to a broker. The local bridge exists purely as a data service (Dhan quotes,
 // candles, option chain) because the browser can't call api.dhan.co directly.
-// The local bridge always listens here; used as the default when no URL is set.
-const DEFAULT_BRIDGE_URL = "http://127.0.0.1:5000/signal";
 
 function buildTelegramMessage(parsed, assetLabel, tf) {
   const biasEmoji = parsed.bias === "BULLISH" ? "🟢" : parsed.bias === "BEARISH" ? "🔴" : "🟡";
@@ -1433,27 +1426,6 @@ function calcRSI(candles, period=14) {
 }
 
 // ─── OHLCV CANDLE FETCHER (per asset + timeframe) ────────────────────────────
-// How many days of history to pull per timeframe (Dhan intraday keeps ~90 days).
-const DHAN_TF_DAYS = { "1m": 2, "5m": 5, "15m": 10, "1H": 30, "4H": 85, "1D": 365, "1W": 730 };
-
-// Merge fine candles into coarser buckets (4H from 1H, 1W from 1D).
-function aggregateCandles(rows, groupSize) {
-  const out = [];
-  for (let i = 0; i < rows.length; i += groupSize) {
-    const grp = rows.slice(i, i + groupSize);
-    if (!grp.length) break;
-    const open = grp[0].open, close = grp[grp.length - 1].close;
-    out.push({
-      ts:    grp[0].ts,
-      open, close,
-      high:  Math.max(...grp.map(c => c.high)),
-      low:   Math.min(...grp.map(c => c.low)),
-      vol:   grp.reduce((a, c) => a + (c.vol || 0), 0),
-      bull:  close >= open,
-    });
-  }
-  return out;
-}
 
 // All candles come from Dhan (via the bridge). 4H/1W aggregate from 1H/1D.
 async function fetchCandles(assetId, tf) {
@@ -2315,15 +2287,6 @@ function EquityCurve({curve}) {
 }
 
 // ─── TRADINGVIEW ADVANCED CHART ───────────────────────────────────────────────
-const TV_SYMBOLS = {
-  NIFTY50:   "NSE:NIFTY",
-  BANKNIFTY: "NSE:BANKNIFTY",
-  SENSEX:    "BSE:SENSEX",
-  FINNIFTY:  "NSE:CNXFINANCE",
-};
-const TV_TF_MAP = {
-  "1m":"1","5m":"5","15m":"15","1H":"60","4H":"240","1D":"D","1W":"W",
-};
 
 function TradingViewChart({ asset, price, change }) {
   const containerRef = useRef(null);
@@ -2541,7 +2504,6 @@ function DhanLightweightChart({ candles, asset, price, change, marketOpen=true }
 }
 
 // ─── CHART SWITCHER ───────────────────────────────────────────────────────────
-const DHAN_CHART_ASSETS = ["NIFTY50", "BANKNIFTY", "SENSEX", "FINNIFTY"];
 function ChartSwitcher({ asset, price, change, candles, marketOpen=true }) {
   const [mode, setMode] = useState("tv"); // "tv" | "ict"
   const isDhan = DHAN_CHART_ASSETS.includes(asset);
@@ -2843,14 +2805,6 @@ function setGuardrails(v) {
 }
 
 // Current time in IST as a Date (regardless of the machine's local zone).
-function nowIST() {
-  const n = new Date();
-  return new Date(n.getTime() + (n.getTimezoneOffset() + 330) * 60000);
-}
-function istDayKey(ts) {
-  const n = new Date(ts);
-  return new Date(n.getTime() + (n.getTimezoneOffset() + 330) * 60000).toDateString();
-}
 
 // Is this an Indian exchange instrument (NSE/BSE)? Open-lockout & expiry rules
 // apply to these only — BTC/XAU/ETH trade 24/7 and have no NSE 09:15 open.
@@ -6636,8 +6590,6 @@ function HistoryPage({ history, setHistory }) {
 // the current values from Dhan's scrip master (Settings → "Update lot sizes")
 // and cache them. Futures and options share the same lot per index. Defaults
 // below are the last-known values, used until a refresh runs.
-const LOT_SIZE_DEFAULTS = { NIFTY50: 65, BANKNIFTY: 30, SENSEX: 20, FINNIFTY: 60 };
-const APP_TO_DHAN = { NIFTY50: "NIFTY", BANKNIFTY: "BANKNIFTY", SENSEX: "SENSEX", FINNIFTY: "FINNIFTY" };
 
 function getStoredLots() {
   try { return JSON.parse(localStorage.getItem("alphaedge_lot_sizes") || "{}"); }
@@ -6674,15 +6626,6 @@ async function refreshLotSizes() {
   }
 }
 
-// Exponential moving average series.
-function emaSeries(vals, period) {
-  if (!vals.length) return [];
-  const k = 2 / (period + 1);
-  let prev = vals[0];
-  const out = [prev];
-  for (let i = 1; i < vals.length; i++) { prev = vals[i] * k + prev * (1 - k); out.push(prev); }
-  return out;
-}
 
 // Detect the market regime from the underlying's candles + the option chain, and
 // recommend NO_TRADE / BUY_CALL / BUY_PUT. Long options need a directional trend
@@ -7844,15 +7787,6 @@ function setDhanClientId(c) { localStorage.setItem("alphaedge_dhan_client_id", c
 
 // Dhan securityId map for the instruments we can backtest in the browser.
 // Index IDs are stable; add stocks/F&O via dhan_lookup.py (Python) if needed.
-const DHAN_INSTRUMENTS = {
-  NIFTY50:   { securityId: "13", segment: "IDX_I", instrument: "INDEX", label: "Nifty 50" },
-  BANKNIFTY: { securityId: "25", segment: "IDX_I", instrument: "INDEX", label: "Bank Nifty" },
-  SENSEX:    { securityId: "51", segment: "IDX_I", instrument: "INDEX", label: "Sensex" },
-  FINNIFTY:  { securityId: "27", segment: "IDX_I", instrument: "INDEX", label: "Fin Nifty" },
-};
-
-// Dhan intraday interval (minutes) keyed by our timeframe label.
-const DHAN_TF_INTERVAL = { "1m": "1", "5m": "5", "15m": "15", "1H": "60" };
 
 // Last Dhan-fetch error, surfaced to the Backtest UI for clear diagnostics.
 let dhanLastError = "";
@@ -7933,15 +7867,6 @@ async function fetchDhanHistorical(instrumentKey, tf, fromDate, toDate) {
 }
 
 // Indian cash market hours: Mon–Fri 09:15–15:30 IST.
-function isIndianMarketOpen() {
-  const now = new Date();
-  // Convert to IST (UTC+5:30) regardless of the machine's local zone.
-  const ist = new Date(now.getTime() + (now.getTimezoneOffset() + 330) * 60000);
-  const day = ist.getDay();
-  if (day === 0 || day === 6) return false;       // Sun/Sat
-  const mins = ist.getHours() * 60 + ist.getMinutes();
-  return mins >= (9 * 60 + 15) && mins <= (15 * 60 + 30);  // 555..930
-}
 
 // Real Dhan candles for a homepage chart, in the app's candle shape.
 // Pulls intraday history (last ~5 days) via the bridge-backed historical path.
@@ -8033,13 +7958,6 @@ async function fetchOptionChain(underlying, range = 6) {
 }
 
 // ─── REAL PRICE FETCHER ───────────────────────────────────────────────────────
-// Yahoo Finance symbols for each index (URL-encoded), used when the bridge is down.
-const YAHOO_INDEX = {
-  NIFTY50:   "%5ENSEI",
-  BANKNIFTY: "%5ENSEBANK",
-  SENSEX:    "%5EBSESN",
-  FINNIFTY:  "NIFTY_FIN_SERVICE.NS",
-};
 
 async function fetchRealPrices() {
   const result = {};
