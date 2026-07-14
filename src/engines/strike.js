@@ -88,11 +88,15 @@ export function expectedMove(chain, dteYears = null) {
   return null;
 }
 
-// Dynamic strike selection for a direction. Prefers |delta| in [0.45,0.65]
-// (ATM / slightly-ITM), ranks by closeness to 0.55, then tight spread, then OI;
-// rejects premium below the floor. Returns { leg, moneyness, reasons } or null.
-export function selectStrike({ chain, direction, minPremium = 40, expected = null }) {
+// Dynamic strike selection for a direction. Prefers |delta| in the style's band
+// (default [0.45,0.65]; swing skews ITM), ranks by closeness to the style's ideal
+// delta, then tight spread, then OI; rejects premium below the floor.
+// Returns { leg, moneyness, reasons } or null.
+export function selectStrike({ chain, direction, minPremium = 40, expected = null, strikePref = null }) {
   if (!chain?.strikes?.length) return null;
+  const deltaLo = strikePref?.deltaLo ?? 0.45;
+  const deltaHi = strikePref?.deltaHi ?? 0.65;
+  const ideal = strikePref?.ideal ?? 0.55;
   const side = direction === "CE" ? "ce" : "pe";
   const spot = chain.under_ltp || 0;
   const legs = chain.strikes.map(s => {
@@ -102,11 +106,11 @@ export function selectStrike({ chain, direction, minPremium = 40, expected = nul
     return { strike: s.strike, atm: s.atm, ltp: leg.ltp || 0, oi: leg.oi || 0, iv: leg.iv || 0,
              delta: leg.delta || 0, theta: leg.theta || 0, adelta, spreadPct };
   });
-  const eligible = legs.filter(l => l.ltp >= minPremium && l.adelta >= 0.45 && l.adelta <= 0.65);
+  const eligible = legs.filter(l => l.ltp >= minPremium && l.adelta >= deltaLo && l.adelta <= deltaHi);
   const pool = eligible.length ? eligible : legs.filter(l => l.ltp >= minPremium);
   if (!pool.length) return null;
   pool.sort((a, b) =>
-    Math.abs(a.adelta - 0.55) - Math.abs(b.adelta - 0.55) ||
+    Math.abs(a.adelta - ideal) - Math.abs(b.adelta - ideal) ||
     a.spreadPct - b.spreadPct ||
     b.oi - a.oi);
   const leg = pool[0];
@@ -121,7 +125,7 @@ export function selectStrike({ chain, direction, minPremium = 40, expected = nul
     else moneyness = diff > 0 ? "ITM" : "OTM";
   }
   const reasons = [];
-  reasons.push(`Delta ${leg.delta.toFixed(2)} (${moneyness}) — ${leg.adelta >= 0.45 && leg.adelta <= 0.65 ? "in the 0.45–0.65 sweet band" : "closest available to 0.55"}`);
+  reasons.push(`Delta ${leg.delta.toFixed(2)} (${moneyness}) — ${leg.adelta >= deltaLo && leg.adelta <= deltaHi ? `in the ${deltaLo}–${deltaHi} band` : `closest available to ${ideal}`}`);
   if (leg.spreadPct) reasons.push(`Spread ${(leg.spreadPct * 100).toFixed(1)}% of premium`);
   reasons.push(`Premium ₹${leg.ltp} · OI ${leg.oi.toLocaleString("en-IN")}`);
   return { leg, moneyness, reasons };

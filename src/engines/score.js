@@ -11,6 +11,7 @@ import { detectSwings, detectBOS, detectOrderBlocks, detectFVGs, detectLiquidity
 import { detectRegime } from "./regime.js";
 import { expectedMove, selectStrike, optionsTradePlan } from "./strike.js";
 import { evaluateGuardrails, marketSession } from "./guardrails.js";
+import { selectStyle, styleWeights, STYLE_STRIKE, STYLE_HOLD } from "./style.js";
 
 export const DEFAULT_WEIGHTS = { trend: 20, momentum: 15, ict: 20, chainOi: 15, greeks: 10, ivVix: 10, risk: 5, news: 5 };
 export const SCORE_WEIGHTS_KEY = "alphaedge_score_weights";
@@ -158,13 +159,14 @@ function factorChainOI(dir, w, { oi, chain }) {
 }
 
 // ── Factor 5: Greeks on the CHOSEN strike (directional; runs after selection) ──
-function factorGreeks(dir, w, { leg, spot, dteYears }) {
+function factorGreeks(dir, w, { leg, spot, dteYears, strikePref }) {
   if (!leg) return F(w, 0, ["No strike selected"], true);
   const reasons = [];
   let pts = 0;
   const adelta = Math.abs(leg.delta || 0);
-  if (adelta >= 0.50 && adelta <= 0.60) { pts += 4; reasons.push(`Delta ${leg.delta.toFixed(2)} — ideal`); }
-  else if (adelta >= 0.45 && adelta <= 0.65) { pts += 2.5; reasons.push(`Delta ${leg.delta.toFixed(2)} — acceptable`); }
+  const ideal = strikePref?.ideal ?? 0.55;
+  if (Math.abs(adelta - ideal) <= 0.05) { pts += 4; reasons.push(`Delta ${leg.delta.toFixed(2)} — ideal for style`); }
+  else if (adelta >= (strikePref?.deltaLo ?? 0.45) && adelta <= (strikePref?.deltaHi ?? 0.65)) { pts += 2.5; reasons.push(`Delta ${leg.delta.toFixed(2)} — in style band`); }
   const thetaBurden = leg.ltp > 0 ? Math.abs(leg.theta || 0) / leg.ltp * 100 : 100;
   if (thetaBurden <= 4) { pts += 3; reasons.push(`Theta burden ${thetaBurden.toFixed(1)}%/day — low`); }
   else if (thetaBurden <= 10) { pts += 1.5; reasons.push(`Theta burden ${thetaBurden.toFixed(1)}%/day — moderate`); }
@@ -231,7 +233,7 @@ export function scoreOption(inputs) {
   const {
     underlying, candles5m, candles15m, candles1H,
     chain, oi, vix, history = [], events = {}, mm = {}, riskPct = 1,
-    weights = getScoreWeights(),
+    baseWeights = getScoreWeights(),
   } = inputs;
 
   const gates = [];
@@ -243,6 +245,16 @@ export function scoreOption(inputs) {
 
   // Regime read (logged + can veto).
   const regime = detectRegime({ candles: candles15m || [], chain, vix, oi, eventSoon, eventToday });
+
+  // Trade-style selection (Strategy Selector) → per-style weight profile + strike
+  // preference + hold. Caller may force a style via inputs.style.
+  const styleSel = inputs.style
+    ? { style: inputs.style, label: STYLE_STRIKE[inputs.style] ? inputs.style : inputs.style, reasons: ["Manual style override"], alternatives: [] }
+    : selectStyle({ regime, vix, dteYears });
+  const style = styleSel.style;
+  const strikePref = STYLE_STRIKE[style] || STYLE_STRIKE.INTRADAY;
+  const hold = STYLE_HOLD[style] || STYLE_HOLD.INTRADAY;
+  const weights = styleWeights(style, baseWeights);
 
   // ── HARD GATES ──
   if (!chain?.ok && !chain?.strikes?.length) gates.push("No option chain — cannot evaluate");
@@ -263,7 +275,7 @@ export function scoreOption(inputs) {
       ict: factorICT(dir, weights.ict, { candles15m }),
       chainOi: factorChainOI(dir, weights.chainOi, { oi, chain }),
       ivVix: factorIVVix(dir, weights.ivVix, { chain, vix, eventInDTE }),
-      greeks: factorGreeks(dir, weights.greeks, { leg: chosenLeg, spot: chain?.under_ltp, dteYears }),
+      greeks: factorGreeks(dir, weights.greeks, { leg: chosenLeg, spot: chain?.under_ltp, dteYears, strikePref }),
       risk: factorRisk(weights.risk, { guardEval, session }),
       news: factorNews(weights.news, { eventMin, eventToday }),
     };
@@ -278,8 +290,9 @@ export function scoreOption(inputs) {
     .reduce((s, [, v]) => s + (v.missing ? 0 : v.points), 0);
   const direction = dirTotal(preCE) >= dirTotal(prePE) ? "CE" : "PE";
 
-  // Select strike for the winning direction, then finalize with greeks.
-  const pick = selectStrike({ chain, direction, minPremium: minPrem, expected: em });
+  // Select strike for the winning direction (style-specific delta band), then
+  // finalize with greeks.
+  const pick = selectStrike({ chain, direction, minPremium: minPrem, expected: em, strikePref });
   const chosenLeg = pick?.leg || null;
   const factors = scoreDir(direction, chosenLeg);
 
@@ -301,17 +314,20 @@ export function scoreOption(inputs) {
            : verdict === "WATCH" ? `Score ${score} — setup forming, wait for confirmation`
            : `Score ${score} — no decisive edge`;
 
-  // ── plan + expected move ──
+  // ── plan + expected move (hold time from the style) ──
   const plan = (verdict !== "NO_TRADE" && chosenLeg)
-    ? optionsTradePlan({ rec: { ltp: chosenLeg.ltp }, underlying, mm, riskPct }) : null;
+    ? { ...optionsTradePlan({ rec: { ltp: chosenLeg.ltp }, underlying, mm, riskPct }),
+        maxHoldMin: hold.maxHoldMin, squareOff: hold.squareOff } : null;
+
+  const styleInfo = { style, label: styleSel.label, hold: hold.label, reasons: styleSel.reasons, alternatives: styleSel.alternatives || [] };
 
   // ── decision report (the explainable output) ──
-  const report = buildReport({ underlying, direction, verdict, score, regime, factors, pick, chosenLeg, chain, oi, vix, em, plan, why, gates });
+  const report = buildReport({ underlying, direction, verdict, score, regime, styleInfo, factors, pick, chosenLeg, chain, oi, vix, em, plan, why, gates });
 
   return {
     ok: true, underlying, direction: verdict === "NO_TRADE" ? "NO_TRADE" : direction,
     verdict, score, coverage, why, gates,
-    regime, factors, weights,
+    regime, style: styleInfo, factors, weights,
     strike: chosenLeg ? { strike: chosenLeg.strike, moneyness: pick?.moneyness, ltp: chosenLeg.ltp,
                           delta: chosenLeg.delta, theta: chosenLeg.theta, iv: chosenLeg.iv,
                           expiry: chain?.expiry, reasons: pick?.reasons || [] } : null,
@@ -321,7 +337,7 @@ export function scoreOption(inputs) {
 }
 
 // Build the human-readable decision report array.
-function buildReport({ underlying, direction, verdict, score, regime, factors, pick, chosenLeg, chain, oi, vix, em, plan, why }) {
+function buildReport({ underlying, direction, verdict, score, regime, styleInfo, factors, pick, chosenLeg, chain, oi, vix, em, plan, why }) {
   const lines = [];
   if (verdict === "NO_TRADE") {
     lines.push({ k: "Verdict", v: "NO TRADE", tone: "warn" });
@@ -332,6 +348,7 @@ function buildReport({ underlying, direction, verdict, score, regime, factors, p
   const label = chosenLeg ? `${verdict === "WATCH" ? "WATCH" : "BUY"} ${underlying} ${chosenLeg.strike} ${direction}${chain?.expiry ? " " + chain.expiry.slice(5) : ""}` : `${verdict} ${underlying} ${direction}`;
   lines.push({ k: "Trade", v: label, tone: direction === "CE" ? "good" : "bad" });
   lines.push({ k: "Confidence", v: `${score}/100 (${verdict})`, tone: score >= 70 ? "good" : "warn" });
+  if (styleInfo) lines.push({ k: "Style", v: `${styleInfo.label} · hold ${styleInfo.hold}` });
   lines.push({ k: "Market Regime", v: `${regime.label} · ${regime.confidence}%` });
   lines.push({ k: "Trending OI", v: `${oi?.smartMoney?.bias || "—"} · ${oi?.matrix?.underlying?.replace(/_/g, " ") || "—"}` });
   if (chosenLeg) lines.push({ k: "Greeks", v: `Δ ${chosenLeg.delta?.toFixed(2)} · θ ${chosenLeg.theta?.toFixed(1)}/day · IV ${chosenLeg.iv}` });

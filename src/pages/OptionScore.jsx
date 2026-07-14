@@ -44,6 +44,7 @@ export default function OptionScorePage({ onPaperTrade }) {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
   const [expanded, setExpanded] = useState(null);
+  const [styleOverride, setStyleOverride] = useState(null);  // null = auto-select
 
   useEffect(() => { loadHistory().then(setHistory); }, []);
 
@@ -67,10 +68,10 @@ export default function OptionScorePage({ onPaperTrade }) {
     return scoreOption({
       underlying,
       candles5m: raw.candles5m, candles15m: raw.candles15m, candles1H: raw.candles1H,
-      chain: raw.chain, oi, vix: raw.vix,
+      chain: raw.chain, oi, vix: raw.vix, style: styleOverride,
       history, events: {}, mm: getMoneyMgt(), riskPct: getRiskPolicy().maxRiskPct,
     });
-  }, [raw, history, underlying]);
+  }, [raw, history, underlying, styleOverride]);
 
   const label = ASSETS.find(a => a.id === underlying)?.label || underlying;
 
@@ -89,7 +90,7 @@ export default function OptionScorePage({ onPaperTrade }) {
             </button>
           }
         >
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
             {ASSETS.map(a => (
               <span key={a.id} onClick={() => setUnderlying(a.id)}
                 style={{ fontSize: 11, padding: "5px 13px", borderRadius: 6, cursor: "pointer", fontFamily: "monospace",
@@ -100,6 +101,22 @@ export default function OptionScorePage({ onPaperTrade }) {
                 {a.label}
               </span>
             ))}
+            {/* Style selector — Auto lets the engine pick from the regime */}
+            <div style={{ marginLeft: "auto", display: "flex", gap: 4, alignItems: "center" }}>
+              <span style={{ fontSize: 8, color: C.faint, letterSpacing: "0.06em" }}>STYLE</span>
+              {[["auto", "Auto"], ["SCALP", "Scalp"], ["INTRADAY", "Intraday"], ["SWING", "Swing"]].map(([v, l]) => {
+                const active = (styleOverride || "auto") === v;
+                return (
+                  <span key={v} onClick={() => setStyleOverride(v === "auto" ? null : v)}
+                    style={{ fontSize: 9, padding: "4px 9px", borderRadius: 5, cursor: "pointer", fontFamily: "monospace",
+                      fontWeight: active ? 700 : 400,
+                      background: active ? "#1e3a5a" : C.bg, color: active ? C.amber : C.dim,
+                      border: `0.5px solid ${active ? C.amber : C.edge}` }}>
+                    {l}
+                  </span>
+                );
+              })}
+            </div>
           </div>
         </Card>
 
@@ -157,17 +174,33 @@ export default function OptionScorePage({ onPaperTrade }) {
               </Card>
             )}
 
-            {/* ── Regime ── */}
-            <Card title="MARKET REGIME">
-              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
-                <span style={{ fontSize: 15, fontWeight: 800, color: result.regime.favorable ? C.green : C.amber, fontFamily: "monospace" }}>{result.regime.label}</span>
-                <span style={{ fontSize: 10, color: C.faint }}>{result.regime.confidence}% confidence</span>
-                <span style={{ marginLeft: "auto", fontSize: 9, color: result.regime.favorable ? C.green : C.red, background: C.bg, border: `0.5px solid ${(result.regime.favorable ? C.green : C.red)}40`, borderRadius: 4, padding: "2px 8px", fontFamily: "monospace" }}>
-                  {result.regime.favorable ? "buyer-friendly" : "buyer-hostile"}
-                </span>
-              </div>
-              {result.regime.reasons.map((r, i) => <div key={i} style={{ fontSize: 10, color: C.dim, lineHeight: 1.5 }}>• {r}</div>)}
-            </Card>
+            {/* ── Regime + Style ── */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <Card title="MARKET REGIME">
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+                  <span style={{ fontSize: 15, fontWeight: 800, color: result.regime.favorable ? C.green : C.amber, fontFamily: "monospace" }}>{result.regime.label}</span>
+                  <span style={{ fontSize: 10, color: C.faint }}>{result.regime.confidence}%</span>
+                  <span style={{ marginLeft: "auto", fontSize: 9, color: result.regime.favorable ? C.green : C.red, background: C.bg, border: `0.5px solid ${(result.regime.favorable ? C.green : C.red)}40`, borderRadius: 4, padding: "2px 8px", fontFamily: "monospace" }}>
+                    {result.regime.favorable ? "buyer-friendly" : "buyer-hostile"}
+                  </span>
+                </div>
+                {result.regime.reasons.map((r, i) => <div key={i} style={{ fontSize: 10, color: C.dim, lineHeight: 1.5 }}>• {r}</div>)}
+              </Card>
+
+              {result.style && (
+                <Card title="TRADE STYLE (STRATEGY SELECTOR)">
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+                    <span style={{ fontSize: 15, fontWeight: 800, color: C.blue, fontFamily: "monospace" }}>{result.style.label}</span>
+                    <span style={{ fontSize: 10, color: C.faint }}>hold {result.style.hold}</span>
+                    <span style={{ marginLeft: "auto", fontSize: 8, color: styleOverride ? C.amber : C.green }}>{styleOverride ? "manual" : "auto"}</span>
+                  </div>
+                  {result.style.reasons.map((r, i) => <div key={i} style={{ fontSize: 10, color: C.dim, lineHeight: 1.5 }}>• {r}</div>)}
+                  {result.style.alternatives?.length > 0 && (
+                    <div style={{ marginTop: 5, fontSize: 9, color: C.faint }}>alt: {result.style.alternatives.join(", ")}</div>
+                  )}
+                </Card>
+              )}
+            </div>
 
             {/* ── Factor breakdown ── */}
             <Card title="FACTOR BREAKDOWN — WEIGHTED CONTRIBUTIONS">
