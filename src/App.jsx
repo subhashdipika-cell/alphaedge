@@ -30,6 +30,7 @@ import {
   isIndianInstrument, marketSession, evaluateGuardrails,
 } from "./engines/guardrails.js";
 import { detectOptionsRegime, optionsTradePlan } from "./engines/strike.js";
+import { STYLE_STRIKE, getStrikePref, setStrikePref } from "./engines/style.js";
 import {
   SETTINGS_KEY, loadSettings, persistSettings,
   MONEY_MGT_DEFAULTS, getMoneyMgt, setMoneyMgt, getRiskPolicy,
@@ -4896,6 +4897,21 @@ function SettingsPage() {
   const [historyDays, setHistoryDays] = useState(saved0.historyDays || "30");
   const [autoSave,    setAutoSave]    = useState(saved0.autoSave    ?? true);
   const [savedMsg,    setSavedMsg]    = useState(false);
+  // Per-style strike-delta bands (user-tunable; ATM-gamma vs deep-ITM debate).
+  const [styleStrike, setStyleStrikeState] = useState(()=>({
+    SCALP: getStrikePref("SCALP"), INTRADAY: getStrikePref("INTRADAY"), SWING: getStrikePref("SWING"),
+  }));
+  const editStrike = (style, field, val) => {
+    const pref = { ...styleStrike[style], [field]: parseFloat(val)||0 };
+    setStrikePref(style, pref);
+    setStyleStrikeState(s => ({ ...s, [style]: pref }));
+  };
+  const applyScalpPreset = (kind) => {
+    const p = kind === "itm" ? { deltaLo:0.68, ideal:0.75, deltaHi:0.82, prefer:"ITM" }
+                             : { deltaLo:0.45, ideal:0.55, deltaHi:0.62, prefer:"ATM" };
+    setStrikePref("SCALP", p);
+    setStyleStrikeState(s => ({ ...s, SCALP: p }));
+  };
 
   // Test a provider using the CURRENT state key (not yet saved to localStorage)
   const testProvider = async (provider, key) => {
@@ -5433,6 +5449,37 @@ function SettingsPage() {
               {row("Time-stop (min)","Exit long option after N min (theta guard)",
                 numInput(guardrails.maxHoldMin,v=>setGr({maxHoldMin:v}),5,240,5))}
             </>)}
+          </>
+        )}
+
+        {/* Per-style strike-delta bands */}
+        {section("TRADE-STYLE STRIKE SELECTION — DELTA BANDS",
+          <>
+            <div style={{background:"#0a1e35",border:"0.5px solid #60a5fa30",borderRadius:8,padding:"8px 12px",marginBottom:12}}>
+              <div style={{fontSize:10,color:"#94a3b8",lineHeight:1.6}}>
+                Each style picks the strike whose |delta| sits in its band (closest to <b>ideal</b>). There are two scalp
+                philosophies — <b>ATM/gamma</b> (Δ~0.55, explosive % gains) vs <b>deep-ITM</b> (Δ~0.75, low theta, mimics
+                futures). Set both and let the R&amp;D per-style track record decide.
+              </div>
+              <div style={{display:"flex",gap:6,marginTop:8}}>
+                <button onClick={()=>applyScalpPreset("atm")} style={{fontSize:9,padding:"4px 10px",background:"#060d17",border:"0.5px solid #1e3a5a",borderRadius:5,color:"#60a5fa",cursor:"pointer",fontFamily:"monospace"}}>Scalp preset: ATM (Δ0.55)</button>
+                <button onClick={()=>applyScalpPreset("itm")} style={{fontSize:9,padding:"4px 10px",background:"#060d17",border:"0.5px solid #1e3a5a",borderRadius:5,color:"#f59e0b",cursor:"pointer",fontFamily:"monospace"}}>Scalp preset: Deep-ITM (Δ0.75)</button>
+              </div>
+            </div>
+            {["SCALP","INTRADAY","SWING"].map(style=>(
+              <div key={style} style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
+                <span style={{fontSize:11,color:"#e2e8f0",width:80,fontWeight:600}}>{{SCALP:"Scalp",INTRADAY:"Intraday",SWING:"Swing"}[style]}</span>
+                {[["deltaLo","min Δ"],["ideal","ideal Δ"],["deltaHi","max Δ"]].map(([f,lbl])=>(
+                  <div key={f} style={{display:"flex",flexDirection:"column",gap:2}}>
+                    <span style={{fontSize:8,color:"#7c8ea8"}}>{lbl}</span>
+                    <input type="number" step={0.05} min={0.05} max={0.95} value={styleStrike[style][f]}
+                      onChange={e=>editStrike(style,f,e.target.value)}
+                      style={{width:64,background:"#060d17",border:"0.5px solid #1e3a5a",borderRadius:6,padding:"5px 8px",color:"#e2e8f0",fontSize:12,fontFamily:"monospace",textAlign:"right"}}/>
+                  </div>
+                ))}
+                <span style={{fontSize:9,color:"#7c8ea8",marginLeft:"auto"}}>{styleStrike[style].deltaLo>=0.66?"deep-ITM (low theta)":styleStrike[style].ideal>=0.6?"ITM":"ATM/slight-ITM (gamma)"}</span>
+              </div>
+            ))}
           </>
         )}
 

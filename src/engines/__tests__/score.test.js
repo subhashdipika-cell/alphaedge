@@ -90,11 +90,17 @@ describe("scoreOption — bullish confluence", () => {
 });
 
 describe("scoreOption — hard gates", () => {
-  it("gates 0-DTE (expiry today) to NO_TRADE", () => {
+  it("gates 0-DTE for INTRADAY/SWING but allows a tight SCALP", () => {
     const chain = { ...bullChain(), isExpiryToday: true };
-    const r = scoreOption({ underlying: "NIFTY50", candles5m: trendUp(), candles15m: trendUp(), chain, oi: bullOi(), vix, history: [] });
-    expect(r.verdict).toBe("NO_TRADE");
-    expect(r.gates.some(g => /0-DTE|Expiry/.test(g))).toBe(true);
+    // Forced intraday on an expiry chain → blocked.
+    const intraday = scoreOption({ underlying: "NIFTY50", candles5m: trendUp(), candles15m: trendUp(), chain, oi: bullOi(), vix, history: [], style: "INTRADAY" });
+    expect(intraday.verdict).toBe("NO_TRADE");
+    expect(intraday.gates.some(g => /0-DTE|expiry/i.test(g))).toBe(true);
+    // Scalp on expiry → allowed (not gated for 0-DTE), half-size + 15-min stop.
+    const scalp = scoreOption({ underlying: "NIFTY50", candles5m: trendUp(), candles15m: trendUp(), chain, oi: bullOi(), vix, history: [], style: "SCALP" });
+    expect(scalp.gates.some(g => /0-DTE|expiry/i.test(g))).toBe(false);
+    if (scalp.plan) expect(scalp.plan.sizeFactor).toBe(0.5);
+    expect(scalp.style.zeroDteScalp).toBe(true);
   });
 
   it("gates on missing candles", () => {

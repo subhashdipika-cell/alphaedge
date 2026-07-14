@@ -11,7 +11,7 @@ import { detectSwings, detectBOS, detectOrderBlocks, detectFVGs, detectLiquidity
 import { detectRegime } from "./regime.js";
 import { expectedMove, selectStrike, optionsTradePlan } from "./strike.js";
 import { evaluateGuardrails, marketSession } from "./guardrails.js";
-import { selectStyle, styleWeights, STYLE_STRIKE, STYLE_HOLD } from "./style.js";
+import { selectStyle, styleWeights, STYLE_STRIKE, STYLE_HOLD, getStrikePref } from "./style.js";
 
 export const DEFAULT_WEIGHTS = { trend: 20, momentum: 15, ict: 20, chainOi: 15, greeks: 10, ivVix: 10, risk: 5, news: 5 };
 export const SCORE_WEIGHTS_KEY = "alphaedge_score_weights";
@@ -263,8 +263,15 @@ export function scoreOption(inputs) {
     ? { style: inputs.style, label: STYLE_STRIKE[inputs.style] ? inputs.style : inputs.style, reasons: ["Manual style override"], alternatives: [] }
     : selectStyle({ regime, vix, dteYears, ivp: chain?.ivPercentile ?? null });
   const style = styleSel.style;
-  const strikePref = STYLE_STRIKE[style] || STYLE_STRIKE.INTRADAY;
-  const hold = STYLE_HOLD[style] || STYLE_HOLD.INTRADAY;
+  const strikePref = getStrikePref(style);
+  // 0-DTE is allowed for SCALP only, tightly: a hard 15-min time-stop and a
+  // half-size sizing multiplier (the rest of the expiry-day exposure that
+  // produced the audit loss stays blocked for intraday/swing).
+  const zeroDteScalp = chain?.isExpiryToday && style === "SCALP" && getGuardBlockExpiry();
+  const hold = zeroDteScalp
+    ? { ...STYLE_HOLD.SCALP, maxHoldMin: 15, label: "≤ 15 min (0-DTE)" }
+    : (STYLE_HOLD[style] || STYLE_HOLD.INTRADAY);
+  const sizeFactor = zeroDteScalp ? 0.5 : 1;
   const weights = styleWeights(style, baseWeights);
 
   // ── HARD GATES ──
@@ -272,7 +279,9 @@ export function scoreOption(inputs) {
   if (!candles15m || candles15m.length < 50) gates.push("Insufficient candle history");
   const guardEval = evaluateGuardrails(history, { asset: underlying }, underlying);
   if (guardEval.blocked) gates.push(`Guardrail: ${guardEval.violations[0]}`);
-  if (chain?.isExpiryToday && getGuardBlockExpiry()) gates.push("Expiry day (0-DTE) — guardrail blocks buying");
+  // 0-DTE blocked for intraday/swing; scalp is allowed (tight, half-size).
+  if (chain?.isExpiryToday && getGuardBlockExpiry() && style !== "SCALP")
+    gates.push(`Expiry day (0-DTE) — blocked for ${style.toLowerCase()} (scalp-only on expiry)`);
   if (eventSoon) gates.push(`High-impact event in ~${eventMin}m — stand aside`);
   if (!regime.favorable && (regime.regime === "RANGE" || regime.regime === "VOL_COMPRESSION")) gates.push(`Regime ${regime.label} — buyer-hostile`);
 
@@ -325,12 +334,14 @@ export function scoreOption(inputs) {
            : verdict === "WATCH" ? `Score ${score} — setup forming, wait for confirmation`
            : `Score ${score} — no decisive edge`;
 
-  // ── plan + expected move (hold time from the style) ──
+  // ── plan + expected move (hold + size from the style; 0-DTE scalp is half-size) ──
   const plan = (verdict !== "NO_TRADE" && chosenLeg)
-    ? { ...optionsTradePlan({ rec: { ltp: chosenLeg.ltp }, underlying, mm, riskPct }),
-        maxHoldMin: hold.maxHoldMin, squareOff: hold.squareOff } : null;
+    ? { ...optionsTradePlan({ rec: { ltp: chosenLeg.ltp }, underlying, mm, riskPct: riskPct * sizeFactor }),
+        maxHoldMin: hold.maxHoldMin, squareOff: hold.squareOff, sizeFactor } : null;
 
-  const styleInfo = { style, label: styleSel.label, hold: hold.label, reasons: styleSel.reasons, alternatives: styleSel.alternatives || [] };
+  const styleReasons = [...styleSel.reasons];
+  if (zeroDteScalp) styleReasons.push("0-DTE scalp — half size + 15-min hard time-stop");
+  const styleInfo = { style, label: styleSel.label, hold: hold.label, reasons: styleReasons, alternatives: styleSel.alternatives || [], zeroDteScalp };
 
   // ── decision report (the explainable output) ──
   const report = buildReport({ underlying, direction, verdict, score, regime, styleInfo, factors, pick, chosenLeg, chain, oi, vix, em, plan, why, gates });

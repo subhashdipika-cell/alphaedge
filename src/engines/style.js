@@ -29,13 +29,34 @@ export const STYLE_WEIGHT_BIAS = {
   SWING:    { trend: 1.6, momentum: 0.5, ict: 1.2, chainOi: 0.6, greeks: 0.9, ivVix: 1.4, risk: 1.0, news: 1.4 },
 };
 
-// Strike-delta preference per style. Scalp/Intraday: ATM / slightly-ITM high
-// delta for speed & liquidity. Swing: deeper ITM for lower theta / resilience.
+// Strike-delta preference per style (DEFAULTS). Scalp/Intraday: ATM / slightly-ITM
+// high delta for speed & liquidity. Swing: deeper ITM for lower theta / resilience.
+// User-overridable in Settings (there's a live debate between ATM-gamma and
+// deep-ITM-low-theta scalping) — see getStrikePref.
 export const STYLE_STRIKE = {
   SCALP:    { deltaLo: 0.45, deltaHi: 0.62, ideal: 0.55, prefer: "ATM" },
   INTRADAY: { deltaLo: 0.45, deltaHi: 0.65, ideal: 0.55, prefer: "ATM" },
   SWING:    { deltaLo: 0.55, deltaHi: 0.80, ideal: 0.65, prefer: "ITM" },
 };
+export const STYLE_STRIKE_KEY = "alphaedge_style_strike";
+
+// Effective strike preference for a style: user override (Settings) merged over
+// the default. Lets you A/B ATM-gamma vs deep-ITM scalping and let the R&D
+// per-style track record decide.
+export function getStrikePref(style) {
+  const base = STYLE_STRIKE[style] || STYLE_STRIKE.INTRADAY;
+  try {
+    const all = JSON.parse(localStorage.getItem(STYLE_STRIKE_KEY) || "{}");
+    return { ...base, ...(all[style] || {}) };
+  } catch { return base; }
+}
+export function setStrikePref(style, pref) {
+  try {
+    const all = JSON.parse(localStorage.getItem(STYLE_STRIKE_KEY) || "{}");
+    all[style] = { ...(all[style] || {}), ...pref };
+    localStorage.setItem(STYLE_STRIKE_KEY, JSON.stringify(all));
+  } catch { /* ignore */ }
+}
 
 // Hold / time-stop per style. Scalp/Intraday square off intraday; swing holds
 // overnight to a multi-day cap.
