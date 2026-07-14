@@ -1,69 +1,55 @@
-# AlphaEdge → MetaTrader 5 Bridge
+# AlphaEdge → Dhan (India) Data Bridge
 
-A small program that lets AlphaEdge place trades in your MT5 terminal.
-A browser can't talk to MT5 directly, so this bridge sits in between:
+A small local service that gives the AlphaEdge browser app access to Dhan
+market data. A browser can't call `api.dhan.co` directly (CORS), so this
+bridge sits in between:
 
 ```
-AlphaEdge (browser)  ──POST signal──▶  bridge.py  ──order_send──▶  MT5 terminal
+AlphaEdge (browser)  ──GET/POST──▶  bridge.py  ──HTTPS──▶  Dhan API
 ```
 
-## One-time setup
-
-1. **Open MT5** and log into a working account (demo is perfect for testing).
-2. In MT5: **Tools → Options → Expert Advisors → tick "Allow algorithmic trading"**.
-3. Make sure you have **Python** installed (https://python.org).
+**This bridge places NO broker orders.** AlphaEdge is decision-support +
+paper trading only (the MT5 execution path was removed in the 2026-07
+Indian-options revamp).
 
 ## Start the bridge
 
-Double-click **`run.bat`** (it installs the `MetaTrader5` package the first time,
-then starts the bridge). You should see:
+Double-click **`run.bat`** (it installs the `dhanhq` package the first time,
+then starts the bridge on `http://127.0.0.1:5000`). Leave the window open —
+closing it stops the bridge.
 
-```
-Connected to MT5: account 25600027 (VantageMarkets-Demo) ...
-Mode: DRY-RUN (no real orders)
-Listening on http://localhost:5000/signal
-```
+Dhan credentials are read from `../strategy-lab/dhan_config.json` and the
+access token auto-refreshes daily via PIN + TOTP (`dhan_token_refresh.py`).
 
-Leave that window open — closing it stops the bridge.
+## Endpoints
 
-## Point AlphaEdge at it
+| Route                  | Method | What it returns                                                          |
+| ---------------------- | ------ | ------------------------------------------------------------------------ |
+| `/price`               | GET    | Live Dhan quotes: NIFTY50, BANKNIFTY, SENSEX, FINNIFTY + INDIAVIX         |
+| `/dhan/vix`            | GET    | India VIX (`source:"dhan"`), or a collected-ATM-IV percentile proxy      |
+| `/dhan/optionchain`    | POST   | ATM±range chain with greeks/IV + `ivPercentile`; CSV-snapshot fallback off-hours |
+| `/dhan/historical`     | POST   | Index-futures candles (1m/5m/15m/1H/1D), auto-rolled contract            |
+| `/dhan/lotsizes`       | GET    | Current F&O index lot sizes from the Dhan scrip master                   |
+| `/dhan/profile`        | POST   | Dhan account/funds check (token validation)                              |
+| `/market/holiday`      | GET    | NSE trading-day flag + holiday calendar (refreshed daily from dhan.co)   |
+| `/wiki/*`              | GET    | Obsidian trader-wiki pages/context                                       |
+| `/obsidian/monthly`    | POST   | Writes the app's monthly trade rollup markdown into the Obsidian vault   |
 
-In AlphaEdge → **Settings → MT5 Terminal**, set:
+Anything else returns `404` — there is no order endpoint.
 
-```
-Bridge / API URL:   http://localhost:5000/signal
-```
+## Data files it reads
 
-Click **Save Settings**. Now every signal AlphaEdge generates is sent to MT5.
-
-## Going live (placing real orders)
-
-The bridge **starts in DRY-RUN mode** — it only prints what it *would* trade, so you
-can test safely. When you're happy:
-
-1. Open `bridge.py`.
-2. Change `DRY_RUN = True` to `DRY_RUN = False`.
-3. Restart the bridge.
-
-## Settings you can change (top of `bridge.py`)
-
-| Setting        | Meaning                                                            |
-| -------------- | ------------------------------------------------------------------ |
-| `DRY_RUN`      | `True` = log only · `False` = place real orders                    |
-| `DEFAULT_LOT`  | Lot size used per trade (default `0.01`)                           |
-| `RISK_PERCENT` | `0` = always use DEFAULT_LOT · e.g. `1.0` = risk 1% of balance     |
-| `MAX_LOT`      | Hard cap — never trade bigger than this                            |
-| `SYMBOL_MAP`   | Maps AlphaEdge names (BTC/USD…) to your broker's symbols (BTCUSD…) |
-
-The bridge auto-tries common broker suffixes (`XAUUSD`, `XAUUSD+`, `XAUUSD.m`, …),
-so you usually don't need to touch `SYMBOL_MAP`.
+- `../strategy-lab/data/options/{UNDERLYING}_OPT_{date}.csv` — minute-level
+  option-chain snapshots written by `dhan_options_collector.py`. Used for the
+  off-hours chain fallback, IV percentile, and (from revamp Phase 4) the
+  Trending-OI and premium-series endpoints.
+- `nse_holidays.json` — cached holiday calendar.
 
 ## Troubleshooting
 
-- **"MetaTrader5 package not installed"** → run `pip install MetaTrader5`.
-- **Orders rejected / "AutoTrading disabled"** → enable *Allow algorithmic trading* in MT5 options.
-- **"no MT5 symbol found for ..."** → add the correct broker symbol to `SYMBOL_MAP`.
-- **Bridge can't connect** → make sure the MT5 terminal is open and logged in first.
-
-> ⚠️ This places real orders when `DRY_RUN = False`. Test on a **demo** account first,
-> keep lot sizes small, and never risk money you can't afford to lose.
+- **"dhanhq not installed"** → run `pip install dhanhq` in the repo venv.
+- **Invalid/expired token** → regenerate on Dhan or run
+  `python ../strategy-lab/dhan_token_refresh.py`; after a cold boot make sure
+  Windows time sync ran (TOTP is time-sensitive).
+- **Empty quotes off-hours** → normal; Dhan serves last-close OHLC, and the
+  chain endpoint falls back to the last collected CSV snapshot.
