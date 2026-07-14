@@ -8,6 +8,14 @@ import {
 } from "./data/constants.js";
 import { IST_SHIFT_MS, nowIST, istDayKey, isIndianMarketOpen } from "./lib/ist.js";
 import { emaSeries, aggregateCandles } from "./lib/math.js";
+import {
+  getDhanToken, setDhanToken, getDhanClientId, setDhanClientId,
+  getAnyBridgeUrl, getDhanLastError,
+  fetchDhanHistorical, fetchDhanChartCandles, fetchBridgePrices, fetchRealPrices,
+  fetchOptionChain,
+  getStoredLots, getLotSize, getLotsUpdatedAt, refreshLotSizes,
+  getNseHolidayInfo, fetchNseHolidayInfo,
+} from "./data/bridge.js";
 
 // ─── STORAGE HELPERS (30-day persistent signal history) ───────────────────────
 const HISTORY_KEY = "signal-history";
@@ -2780,8 +2788,9 @@ function setMoneyMgt(v) {
 
 // ─── DISCIPLINE GUARDRAILS ─────────────────────────────────────────────────────
 // Mechanical rules derived from the 2026-06-23 Dhan option-buying audit (net
-// −₹3.4L). Each maps to a documented flaw and blocks AlphaEdge from executing a
-// rule-violating trade. Thresholds are user-editable (Settings → Discipline).
+// −₹3.4L). Each maps to a documented flaw and flags a rule-violating setup as
+// STAND-DOWN. Thresholds are user-editable (Settings → Discipline). Enforced
+// entirely app-side — AlphaEdge places no orders.
 const GUARDRAIL_DEFAULTS = {
   enabled:          true,
   cooldownMin:      15,    // no new entry within N min of closing a loss
@@ -2791,10 +2800,7 @@ const GUARDRAIL_DEFAULTS = {
   openLockoutEnd:   "10:15", // IST — first entries allowed after this
   blockExpiryDay:   true,  // no 0-DTE long options
   minPremium:       40,    // option-buying premium floor (avoid far-OTM lottery)
-  maxHoldMin:       30,    // time-stop for open option longs (bridge/alert)
-  dailyLossHalt:    0,     // bridge auto-halt: close all + block at −N (MT5 account ccy); 0 = off
-  dailyProfitLock:  0,     // bridge profit lock: block NEW entries once day realized ≥ +N; 0 = off
-  profitGivebackPct: 50,   // bridge give-back stop: lock when day P&L falls N% off its peak; 0 = off
+  maxHoldMin:       30,    // time-stop for open option longs (alert)
 };
 function getGuardrails() {
   try { return { ...GUARDRAIL_DEFAULTS, ...JSON.parse(localStorage.getItem("alphaedge_guardrails") || "{}") }; }
@@ -2811,21 +2817,6 @@ function setGuardrails(v) {
 function isIndianInstrument(asset) {
   const s = String(asset || "").toUpperCase();
   return /NIFTY|BANKNIFTY|SENSEX|BANKEX|FINNIFTY|MIDCP/.test(s);
-}
-
-// NSE holiday info — fetched once per session from the bridge, which refreshes
-// it daily from Dhan's public holiday calendar. Read synchronously by
-// evaluateGuardrails via this module cache.
-let NSE_HOLIDAY_INFO = null;
-async function fetchNseHolidayInfo() {
-  try {
-    const base = (getAnyBridgeUrl() || "").replace(/\/signal\/?$/, "");
-    if (!base) return null;
-    const r = await fetch(`${base}/market/holiday`, { signal: AbortSignal.timeout(8000) });
-    const d = await r.json();
-    if (d && d.ok) NSE_HOLIDAY_INFO = d;
-    return NSE_HOLIDAY_INFO;
-  } catch { return NSE_HOLIDAY_INFO; }
 }
 
 // Trading session + prime-window flag per asset, in IST. Used to TAG every
@@ -2910,7 +2901,7 @@ function evaluateGuardrails(history = [], signal = null, asset = null) {
   // 7) NSE holiday + intraday square-off (Indian instruments only). The bridge
   //    enforces both server-side; this mirrors them in the UI/engine.
   if (indian) {
-    if (NSE_HOLIDAY_INFO?.isHoliday)
+    if (getNseHolidayInfo()?.isHoliday)
       violations.push("NSE holiday today (Dhan calendar) — Indian market closed");
     else if (mins >= 15 * 60 + 5 && mins <= 15 * 60 + 30)
       violations.push("NSE square-off — no new entries after 15:05 IST (flat before 15:20, close 15:30)");
@@ -3171,53 +3162,14 @@ JSON only, no markdown:`;
 function DisciplineMonitor() {
   const [hist, setHist] = useState([]);
   const [tick, setTick] = useState(0);
-  const [risk, setRisk] = useState(null);   // bridge kill-switch / daily-loss state
-  const [busy, setBusy] = useState(false);
-  const prevHalted = useRef(false);
   useEffect(() => {
     let stop = false;
     const load = async () => { const h = await loadHistory(); if (!stop) setHist(h); };
-    const loadRisk = async () => {
-      try {
-        const base = (getAnyBridgeUrl() || "").replace(/\/signal\/?$/, "");
-        if (!base) return;
-        const r = await fetch(`${base}/risk`, { signal: AbortSignal.timeout(8000) });
-        const d = await r.json();
-        if (stop) return;
-        // Alert the moment an AUTO halt engages (bridge already closed everything).
-        if (d.halted && !prevHalted.current && d.autoHaltDay)
-          sendTelegram(`🛑 <b>AUTO-HALT</b>\n${d.reason}\nAll AlphaEdge positions closed — trading blocked until tomorrow (or manual resume).`);
-        prevHalted.current = !!d.halted;
-        setRisk(d);
-      } catch { if (!stop) setRisk(null); }
-    };
-    load(); loadRisk();
+    load();
     fetchNseHolidayInfo();   // daily first-login check (bridge caches per IST day)
-    const iv = setInterval(() => { load(); loadRisk(); setTick(t => t + 1); }, 30000);
+    const iv = setInterval(() => { load(); setTick(t => t + 1); }, 30000);
     return () => { stop = true; clearInterval(iv); };
   }, []);
-
-  const riskPost = async (payload) => {
-    setBusy(true);
-    try {
-      const base = (getAnyBridgeUrl() || "").replace(/\/signal\/?$/, "");
-      const r = await fetch(`${base}/risk`, { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(payload) });
-      const d = await r.json().catch(()=>null);
-      if (d && typeof d.halted === "boolean") { prevHalted.current = d.halted; setRisk(d); }
-      return d;
-    } catch { return null; }
-    finally { setBusy(false); }
-  };
-  const killSwitch = async () => {
-    const n = risk?.pnl?.openPositions ?? 0;
-    if (!window.confirm(`KILL SWITCH — close ${n} open AlphaEdge position(s) at market and block ALL trading until you resume?`)) return;
-    const d = await riskPost({ action:"halt", reason:"Manual kill switch" });
-    if (d) sendTelegram(`🛑 <b>KILL SWITCH</b> pressed — ${d.closeResult?.closed?.length ?? 0} position(s) closed, trading halted.`);
-  };
-  const resumeTrading = async () => {
-    if (!window.confirm("Resume trading? The halt (incl. today's daily-loss stop, if it tripped) will be lifted.")) return;
-    await riskPost({ action:"resume" });
-  };
 
   const g  = getGuardrails();
   const ev = evaluateGuardrails(hist);
@@ -3255,38 +3207,10 @@ function DisciplineMonitor() {
       {!ev.blocked && ev.warnings.map((w,i)=>(
         <div key={i} style={{marginTop:6,fontSize:9,color:"#f59e0b"}}>⚠ {w}</div>
       ))}
-      {NSE_HOLIDAY_INFO?.isHoliday && (
+      {getNseHolidayInfo()?.isHoliday && (
         <div style={{marginTop:6,fontSize:9,color:"#f59e0b"}}>📅 NSE holiday today — Indian market closed (Dhan calendar)</div>
       )}
-      {/* Bridge kill switch + daily-loss auto-halt */}
-      <div style={{marginTop:8,background:"#060d17",border:`0.5px solid ${risk?.halted?"#ef4444":"#1e3a5a"}`,borderRadius:6,padding:"7px 8px"}}>
-        {risk ? (<>
-          <div style={{display:"flex",alignItems:"center",gap:6}}>
-            <span style={{fontSize:8,color:"#7c8ea8",flex:1}}>MT5 P&L TODAY</span>
-            <span style={{fontSize:11,fontWeight:800,fontFamily:"monospace",color:(risk.pnl?.total??0)<0?"#ef4444":"#22c55e"}}>
-              {risk.pnl ? `${risk.pnl.total>=0?"+":""}${risk.pnl.total.toFixed(2)}` : "—"}
-            </span>
-            <span style={{fontSize:8,color:risk.dailyLossLimit>0?"#64748b":"#f59e0b"}}>
-              {risk.dailyLossLimit>0 ? `auto-halt at −${risk.dailyLossLimit}` : "auto-halt OFF"}
-            </span>
-          </div>
-          {risk.halted && (
-            <div style={{marginTop:5,fontSize:9,color:"#fca5a5",lineHeight:1.4}}>🛑 TRADING HALTED — {risk.reason}</div>
-          )}
-          {!risk.halted && risk.profitLock?.active && (
-            <div style={{marginTop:5,fontSize:9,color:"#4ade80",lineHeight:1.4}}>🔒 {risk.profitLock.reason}</div>
-          )}
-          <button onClick={risk.halted?resumeTrading:killSwitch} disabled={busy}
-            style={{marginTop:6,width:"100%",padding:"7px 0",borderRadius:6,cursor:"pointer",fontWeight:800,fontSize:10,letterSpacing:"0.08em",
-              border:`1px solid ${risk.halted?"#22c55e":"#ef4444"}`,color:risk.halted?"#22c55e":"#fff",
-              background:risk.halted?"transparent":"#b91c1c",opacity:busy?0.6:1}}>
-            {busy ? "…" : risk.halted ? "RESUME TRADING" : `🛑 KILL SWITCH — CLOSE ALL${risk.pnl?.openPositions?` (${risk.pnl.openPositions})`:""}`}
-          </button>
-        </>) : (
-          <div style={{fontSize:8,color:"#64748b"}}>Kill switch: bridge offline — start the MT5 bridge on :5000</div>
-        )}
-      </div>
-      <div style={{marginTop:6,fontSize:8,color:"#64748b",lineHeight:1.4}}>
+      <div style={{marginTop:8,fontSize:8,color:"#64748b",lineHeight:1.4}}>
         Also active for option buys: no 0-DTE · ATM/ITM only (≥₹{g.minPremium}) · {g.maxHoldMin}m time-stop. Edit in Settings → Discipline.
       </div>
     </div>
@@ -4189,9 +4113,9 @@ function BacktestPage({candles}) {
       if (!c || c.length<50) {
         setDhanMsg(c
           ? `Only ${c?.length||0} candles returned — widen the range or change timeframe.`
-          : `Dhan fetch failed: ${dhanLastError || "unknown"}. ${
-              /Invalid Token|token/i.test(dhanLastError) ? "RESTART the bridge so it uses the auto-refreshed token, or regenerate the token."
-              : /bridge/i.test(dhanLastError) ? "Start/restart bridge.py and set its URL in Settings → MT5 Terminal."
+          : `Dhan fetch failed: ${getDhanLastError() || "unknown"}. ${
+              /Invalid Token|token/i.test(getDhanLastError()) ? "RESTART the bridge so it uses the auto-refreshed token, or regenerate the token."
+              : /bridge/i.test(getDhanLastError()) ? "Start/restart bridge.py and set its URL in Settings → Local Data Bridge."
               : "For bulk, use strategy-lab/dhan_collector.py."}`);
         setRunning(false); return;
       }
@@ -5583,17 +5507,7 @@ function SettingsPage() {
     if (tgToken)           setTgToken(tgToken);
     if (tgChatId)          setTgChatId(tgChatId);
     setAIProvider(aiProvider);
-    setGuardrails(guardrails);   // discipline rules
-    // Push the bridge-enforced limits (loss auto-halt + profit lock) to the MT5
-    // bridge — the bridge is the enforcer, this is just the config sync.
-    try {
-      const base = (getAnyBridgeUrl() || "").replace(/\/signal\/?$/, "");
-      if (base) fetch(`${base}/risk`, { method:"POST", headers:{ "Content-Type":"application/json" },
-        body: JSON.stringify({ action:"config",
-          dailyLossLimit:    Number(guardrails.dailyLossHalt)    || 0,
-          dailyProfitLock:   Number(guardrails.dailyProfitLock)  || 0,
-          profitGivebackPct: Number(guardrails.profitGivebackPct)|| 0 }) }).catch(()=>{});
-    } catch { /* bridge offline — limits sync on the next save */ }
+    setGuardrails(guardrails);   // discipline rules (enforced app-side)
 
     // Persist all other settings
     persistSettings({ apiKeys, risk, notif, broker, historyDays, autoSave, aiProvider });
@@ -5995,8 +5909,8 @@ function SettingsPage() {
         {section("DISCIPLINE GUARDRAILS — auto-enforced from your Dhan audit",
           <>
             <div style={{background:"#1a0000",border:"0.5px solid #ef444430",borderRadius:8,padding:"8px 12px",marginBottom:12}}>
-              <div style={{fontSize:10,color:"#ef4444",fontWeight:700,marginBottom:2}}>Blocks rule-violating trades before execution</div>
-              <div style={{fontSize:9,color:"#94a3b8",lineHeight:1.5}}>Derived from your 12-month audit (net −₹3.4L). When a rule is hit, AlphaEdge saves the signal to History but does NOT send it to MT5. The Dashboard shows a live CLEAR / STAND-DOWN verdict.</div>
+              <div style={{fontSize:10,color:"#ef4444",fontWeight:700,marginBottom:2}}>Blocks rule-violating setups before you act</div>
+              <div style={{fontSize:9,color:"#94a3b8",lineHeight:1.5}}>Derived from your 12-month audit (net −₹3.4L). When a rule is hit, AlphaEdge flags the setup as STAND-DOWN so you don't place the trade. The Dashboard shows a live CLEAR / STAND-DOWN verdict.</div>
             </div>
             {row("Enable guardrails","Master switch for all discipline rules",toggle(guardrails.enabled,v=>setGr({enabled:v})))}
             {guardrails.enabled && (<>
@@ -6006,22 +5920,16 @@ function SettingsPage() {
                 numInput(guardrails.maxTradesPerDay,v=>setGr({maxTradesPerDay:v}),1,50,1))}
               {row("Consecutive-loss stop","Stop for the session after N losses in a row",
                 numInput(guardrails.maxConsecLosses,v=>setGr({maxConsecLosses:v}),1,10,1))}
-              {row("Block NSE open","No Indian-market entries during the volatile open (BTC/XAU/ETH exempt)",toggle(guardrails.openLockout,v=>setGr({openLockout:v})))}
-              {guardrails.openLockout && row("NSE lockout ends (IST)","First Indian-instrument entries allowed after this time",
+              {row("Block NSE open","No entries during the volatile 09:15 open",toggle(guardrails.openLockout,v=>setGr({openLockout:v})))}
+              {guardrails.openLockout && row("NSE lockout ends (IST)","First entries allowed after this time",
                 <input type="time" value={guardrails.openLockoutEnd} onChange={e=>setGr({openLockoutEnd:e.target.value})}
                   style={{background:"#060d17",border:"0.5px solid #1e3a5a",borderRadius:6,padding:"5px 8px",color:"#e2e8f0",fontSize:12,fontFamily:"monospace"}}/>)}
               {row("Block 0-DTE longs","No option buying on expiry day (option signals)",toggle(guardrails.blockExpiryDay,v=>setGr({blockExpiryDay:v})))}
               {row("Min option premium (₹)","Avoid far-OTM lottery tickets — ATM/ITM only",
                 numInput(guardrails.minPremium,v=>setGr({minPremium:v}),0,500,5))}
-              {row("Time-stop (min)","Exit long option after N min (theta guard — bridge/alert)",
+              {row("Time-stop (min)","Exit long option after N min (theta guard)",
                 numInput(guardrails.maxHoldMin,v=>setGr({maxHoldMin:v}),5,240,5))}
             </>)}
-            {row("Daily-loss auto-halt ($)","Bridge closes ALL AlphaEdge positions + blocks trading for the day when today's MT5 P&L hits −N (account currency). 0 = off. Enforced bridge-side even with guardrails off.",
-              numInput(guardrails.dailyLossHalt,v=>setGr({dailyLossHalt:v}),0,100000,10))}
-            {row("Daily profit lock ($)","Bank the day: once today's REALIZED MT5 P&L reaches +N, the bridge rejects new signals until tomorrow (IST). Open positions keep trailing. 0 = off.",
-              numInput(guardrails.dailyProfitLock,v=>setGr({dailyProfitLock:v}),0,100000,5))}
-            {row("Give-back stop (% off peak)","Once the day peaks at ≥ half the lock target, lock if realized P&L gives back this % of the peak — stops a green day bleeding out through fresh trades' SLs. 0 = off.",
-              numInput(guardrails.profitGivebackPct,v=>setGr({profitGivebackPct:v}),0,100,5))}
           </>
         )}
 
@@ -6590,42 +6498,6 @@ function HistoryPage({ history, setHistory }) {
 // the current values from Dhan's scrip master (Settings → "Update lot sizes")
 // and cache them. Futures and options share the same lot per index. Defaults
 // below are the last-known values, used until a refresh runs.
-
-function getStoredLots() {
-  try { return JSON.parse(localStorage.getItem("alphaedge_lot_sizes") || "{}"); }
-  catch { return {}; }
-}
-// Lot size for an app symbol (NIFTY50/BANKNIFTY/SENSEX/…): live value if fetched,
-// else the last-known default.
-function getLotSize(appSym) {
-  const stored = getStoredLots();
-  const dhanKey = APP_TO_DHAN[appSym] || appSym;
-  const live = Number(stored[dhanKey]);
-  return live > 0 ? live : (LOT_SIZE_DEFAULTS[appSym] || 50);
-}
-function getLotsUpdatedAt() {
-  return localStorage.getItem("alphaedge_lot_sizes_updated") || "";
-}
-
-// Pull current index lot sizes from Dhan's scrip master via the bridge and cache
-// them. Returns {ok, lots, updated} | {ok:false, error}.
-async function refreshLotSizes() {
-  const base = (getAnyBridgeUrl() || "").replace(/\/signal\/?$/, "");
-  if (!base) return { ok: false, error: "No bridge URL set (Settings → MT5 Terminal)." };
-  try {
-    const r = await fetch(`${base}/dhan/lotsizes`, { signal: AbortSignal.timeout(70000) });
-    const d = await r.json();
-    if (d && d.ok && d.lots && Object.keys(d.lots).length) {
-      localStorage.setItem("alphaedge_lot_sizes", JSON.stringify(d.lots));
-      localStorage.setItem("alphaedge_lot_sizes_updated", d.updated || new Date().toISOString());
-      return { ok: true, lots: d.lots, updated: d.updated };
-    }
-    return { ok: false, error: d?.error || "Bridge returned no lot sizes." };
-  } catch (e) {
-    return { ok: false, error: String(e) };
-  }
-}
-
 
 // Detect the market regime from the underlying's candles + the option chain, and
 // recommend NO_TRADE / BUY_CALL / BUY_PUT. Long options need a directional trend
@@ -7777,222 +7649,6 @@ function AnalyticsPage({ candles, prices, history }) {
       </div>
     </div>
   );
-}
-
-// ─── DHAN API HELPERS ─────────────────────────────────────────────────────────
-function getDhanToken() { return localStorage.getItem("alphaedge_dhan_token") || ""; }
-function setDhanToken(t) { localStorage.setItem("alphaedge_dhan_token", t.trim()); }
-function getDhanClientId() { return localStorage.getItem("alphaedge_dhan_client_id") || ""; }
-function setDhanClientId(c) { localStorage.setItem("alphaedge_dhan_client_id", c.trim()); }
-
-// Dhan securityId map for the instruments we can backtest in the browser.
-// Index IDs are stable; add stocks/F&O via dhan_lookup.py (Python) if needed.
-
-// Last Dhan-fetch error, surfaced to the Backtest UI for clear diagnostics.
-let dhanLastError = "";
-
-// Fetch historical candles from Dhan for backtesting.
-// PRIMARY: route through the local MT5 bridge (Python, no CORS) — reliable, and
-// it uses the AUTO-REFRESHED config token (the browser token may be stale).
-// FALLBACK: a public CORS proxy (allorigins) if the bridge isn't running.
-// `tf` is one of: "1m","5m","15m","1H","1D". Returns [{time,...}] or null.
-async function fetchDhanHistorical(instrumentKey, tf, fromDate, toDate) {
-  const token  = getDhanToken();
-  const client = getDhanClientId();
-  const meta   = DHAN_INSTRUMENTS[instrumentKey];
-  if (!meta) return null;        // bridge supplies the token; browser token optional
-  dhanLastError = "";
-
-  const toRow = (t, o, h, l, c, v) => ({
-    time: new Date(Number(t) * 1000).toISOString(),
-    open: Number(o), high: Number(h), low: Number(l), close: Number(c),
-    volume: Number(v || 0),
-  });
-
-  // ── 1) Local bridge (preferred — uses the fresh auto-refreshed token) ─────
-  const bridgeBase = getAnyBridgeUrl();
-  if (bridgeBase) {
-    try {
-      const url = bridgeBase.replace(/\/signal\/?$/, "") + "/dhan/historical";
-      const r = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ instrument: instrumentKey, tf, fromDate, toDate, token, clientId: client }),
-        signal: AbortSignal.timeout(20000),
-      });
-      const d = await r.json().catch(()=>null);
-      if (r.ok && d?.ok && Array.isArray(d.candles) && d.candles.length) {
-        return d.candles.map(k => toRow(k.time, k.open, k.high, k.low, k.close, k.volume));
-      }
-      if (d?.error) dhanLastError = d.error;   // surface the bridge's real reason
-    } catch (e) { dhanLastError = "bridge unreachable — is bridge.py running?"; }
-  } else {
-    dhanLastError = "no MT5 bridge URL set in Settings → MT5 Terminal";
-  }
-
-  // ── 2) Public CORS proxy (fallback) ──────────────────────────────────────
-  const isDaily = tf === "1D";
-  const endpoint = isDaily
-    ? "https://api.dhan.co/v2/charts/historical"
-    : "https://api.dhan.co/v2/charts/intraday";
-  const body = isDaily
-    ? { securityId: meta.securityId, exchangeSegment: meta.segment, instrument: meta.instrument,
-        expiryCode: 0, oi: false, dhanClientId: client, fromDate, toDate }
-    : { securityId: meta.securityId, exchangeSegment: meta.segment, instrument: meta.instrument,
-        interval: Number(DHAN_TF_INTERVAL[tf] || "5"), oi: false, dhanClientId: client, fromDate, toDate };
-
-  try {
-    const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(endpoint)}`;
-    const resp = await fetch(proxyUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "access-token": token,
-        ...(client ? { "client-id": client } : {}),
-        "X-Requested-With": "XMLHttpRequest",
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(15000),
-    });
-    if (!resp.ok) return null;
-    const raw = await resp.json();
-    const d = raw?.data || raw;
-    const o = d?.open, h = d?.high, l = d?.low, c = d?.close, v = d?.volume, t = d?.timestamp;
-    if (!Array.isArray(o) || !Array.isArray(t) || !o.length) return null;
-    const n = Math.min(o.length, h.length, l.length, c.length, t.length);
-    const out = [];
-    for (let i = 0; i < n; i++) out.push(toRow(t[i], o[i], h[i], l[i], c[i], Array.isArray(v) ? v[i] : 0));
-    return out;
-  } catch { return null; }
-}
-
-// Indian cash market hours: Mon–Fri 09:15–15:30 IST.
-
-// Real Dhan candles for a homepage chart, in the app's candle shape.
-// Pulls intraday history (last ~5 days) via the bridge-backed historical path.
-async function fetchDhanChartCandles(instrumentKey, tf = "5m") {
-  const today = new Date();
-  const from  = new Date(today.getTime() - 5 * 86400000);
-  const fmt   = d => d.toISOString().slice(0, 10);
-  const rows  = await fetchDhanHistorical(instrumentKey, tf, fmt(from), fmt(today));
-  if (!rows || rows.length < 10) return null;
-  return rows.map(r => ({
-    open: r.open, high: r.high, low: r.low, close: r.close,
-    bull: r.close >= r.open, vol: r.volume || 0, ts: new Date(r.time).getTime(),
-  }));
-}
-
-// Last-resort live Nifty quote when the bridge isn't running. The primary
-// source is the bridge /price (Dhan, server-side); this allorigins proxy path
-// is flaky and only a fallback.
-async function fetchDhanNifty() {
-  const token = getDhanToken();
-  if (!token) return null;
-  try {
-    // Use allorigins proxy to bypass CORS
-    const body    = JSON.stringify({ IDX_I: ["13"] });
-    const encoded = encodeURIComponent("https://api.dhan.co/v2/marketfeed/quote");
-    const proxyUrl = `https://api.allorigins.win/raw?url=${encoded}`;
-    const resp = await fetch(proxyUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type":  "application/json",
-        "access-token":  token,
-        "X-Requested-With": "XMLHttpRequest",
-      },
-      body,
-      signal: AbortSignal.timeout(6000),
-    });
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    const q = data?.data?.IDX_I?.["13"]
-           || data?.IDX_I?.["13"]
-           || data?.["13"];
-    if (!q) return null;
-    const ltp  = parseFloat(q.ltp || q.LTP || q.last_price || 0);
-    const prev = parseFloat(q.close || q.Close || q.prev_close || q.prevClose || 0);
-    if (!ltp) return null;
-    return { price: ltp, change: prev ? ((ltp-prev)/prev)*100 : 0, source:"Dhan" };
-  } catch { return null; }
-}
-
-// Local Dhan/India bridge URL (Settings may override; default is :5000).
-function getAnyBridgeUrl() {
-  try {
-    const s = JSON.parse(localStorage.getItem("alphaedge_settings") || "{}");
-    // Fall back to the local bridge (always on :5000) so Dhan/Options features
-    // work out-of-the-box when the bridge is running.
-    return s?.broker?.bridgeUrl || s?.broker?.mt5?.demo?.bridgeUrl || DEFAULT_BRIDGE_URL;
-  } catch { return DEFAULT_BRIDGE_URL; }
-}
-
-// Live index quotes (Dhan, server-side) from the local bridge. Returns {} if
-// the bridge isn't running — callers then use web sources.
-async function fetchBridgePrices() {
-  const base = getAnyBridgeUrl();
-  if (!base) return {};
-  const url = base.replace(/\/signal\/?$/, "") + "/price";
-  try {
-    const r = await fetch(url, { signal: AbortSignal.timeout(4000) });
-    if (!r.ok) return {};
-    const d = await r.json();
-    return (d && typeof d === "object" && !d.error) ? d : {};
-  } catch { return {}; }
-}
-
-// Live option chain (ATM±range, greeks/IV) via the bridge. Falls back to the
-// last collected snapshot off-hours (the bridge handles that). Returns the
-// bridge response or {ok:false,error}.
-async function fetchOptionChain(underlying, range = 6) {
-  const base = getAnyBridgeUrl();
-  if (!base) return { ok:false, error:"Start the MT5 bridge — Dhan calls route through it." };
-  try {
-    const url = base.replace(/\/signal\/?$/, "") + "/dhan/optionchain";
-    const r = await fetch(url, {
-      method:"POST", headers:{ "Content-Type":"application/json" },
-      body: JSON.stringify({ underlying, range, token:getDhanToken(), clientId:getDhanClientId() }),
-      signal: AbortSignal.timeout(20000),
-    });
-    return await r.json();
-  } catch (e) { return { ok:false, error:String(e) }; }
-}
-
-// ─── REAL PRICE FETCHER ───────────────────────────────────────────────────────
-
-async function fetchRealPrices() {
-  const result = {};
-
-  // ── Primary: Dhan index quotes via the local bridge ────────────────────────
-  const bp = await fetchBridgePrices();
-  ASSETS.forEach(a => { if (bp[a.id]) result[a.id] = bp[a.id]; });
-
-  // ── Nifty fallback: Dhan direct via CORS proxy (browser token) ─────────────
-  if (!result.NIFTY50) {
-    const n = await fetchDhanNifty();
-    if (n) result.NIFTY50 = n;
-  }
-
-  // ── Last resort per index: Yahoo Finance ───────────────────────────────────
-  for (const a of ASSETS) {
-    if (result[a.id]) continue;
-    const sym = YAHOO_INDEX[a.id];
-    if (!sym) continue;
-    try {
-      const resp = await fetch(
-        `https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=1m&range=1d`,
-        { signal: AbortSignal.timeout(4000) }
-      );
-      if (!resp.ok) continue;
-      const meta = (await resp.json())?.chart?.result?.[0]?.meta;
-      if (meta?.regularMarketPrice) {
-        const cur  = parseFloat(meta.regularMarketPrice);
-        const prev = parseFloat(meta.chartPreviousClose || meta.regularMarketPreviousClose || cur);
-        result[a.id] = { price:cur, change:prev?((cur-prev)/prev)*100:0, source:"Yahoo" };
-      }
-    } catch {}
-  }
-
-  return result;
 }
 
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
