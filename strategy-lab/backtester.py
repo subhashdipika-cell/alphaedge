@@ -1226,51 +1226,6 @@ def run_backtest(
 # ── Daily analysis runner ──────────────────────────────────────────────────────
 
 SYMBOL_STRATEGIES = {
-    "XAUUSD+": [
-        (EMA_Crossover_RSI(),         "M5"),
-        (BB_RSI_Reversal(),           "M5"),
-        (SR_Bounce_Scalp(),           "M5"),
-        (Retest_Breakout(),           "M5"),
-        (Book_Pressure_Scalp_M5(),    "M5"),
-        (VWAP_Reversion_Scalp(),      "M1"),
-        (Book_Pressure_Scalp(),       "M1"),
-        (EMA_Pullback_Swing(),        "H1"),
-        (RSI_Divergence_Swing(),      "H1"),
-        (Retest_Breakout_Swing(),     "H1"),
-        (ORB_Session_Breakout(),      "M5"),
-        (ML_Trader_Confluence(kernel="Matern", regressor="GPR"),       "M5"),  # XAUUSD+
-        (ML_Trader_Confluence_Swing(kernel="Matern", regressor="GPR"), "H1"),
-    ],
-    "BTCUSD": [
-        (EMA_Crossover_RSI(fast=9, slow=26, rsi_os=38, rsi_ob=62), "M5"),
-        (BB_RSI_Reversal(),           "M5"),
-        (SR_Bounce_Scalp(lookback=15, zone_pct=0.002), "M5"),
-        (Retest_Breakout(lookback=15, zone_pct=0.003, min_gap=0.003), "M5"),
-        (Book_Pressure_Scalp_M5(),    "M5"),
-        (VWAP_Reversion_Scalp(),      "M1"),
-        (Book_Pressure_Scalp(),       "M1"),
-        (EMA_Pullback_Swing(),        "H1"),
-        (RSI_Divergence_Swing(),      "H1"),
-        (Retest_Breakout_Swing(),     "H1"),
-        (ORB_Session_Breakout(),      "M5"),
-        (ML_Trader_Confluence(kernel="Laplacian", regressor="SVR"),       "M5"),  # BTCUSD
-        (ML_Trader_Confluence_Swing(kernel="Laplacian", regressor="SVR"), "H1"),
-    ],
-    "ETHUSD": [
-        (EMA_Crossover_RSI(fast=9, slow=26, rsi_os=38, rsi_ob=62), "M5"),
-        (BB_RSI_Reversal(),           "M5"),
-        (SR_Bounce_Scalp(lookback=15, zone_pct=0.002), "M5"),
-        (Retest_Breakout(lookback=15, zone_pct=0.003, min_gap=0.003), "M5"),
-        (Book_Pressure_Scalp_M5(),    "M5"),
-        (VWAP_Reversion_Scalp(),      "M1"),
-        (Book_Pressure_Scalp(),       "M1"),
-        (EMA_Pullback_Swing(),        "H1"),
-        (RSI_Divergence_Swing(),      "H1"),
-        (Retest_Breakout_Swing(),     "H1"),
-        (ORB_Session_Breakout(),      "M5"),
-        (ML_Trader_Confluence(kernel="Laplacian", regressor="SVR"),       "M5"),  # ETHUSD
-        (ML_Trader_Confluence_Swing(kernel="Laplacian", regressor="SVR"), "H1"),
-    ],
     # ── Dhan (Indian market) instruments — data via dhan_collector.py ──────────
     # Only backtested if matching CSVs exist in data/; skipped otherwise.
     "NIFTY50": [
@@ -1328,7 +1283,7 @@ TSL_OFF = TSLLevels(levels=[])
 # full notional (price x lot) dominates (~Rs 300+/lot on Nifty), unlike options
 # where the flat Rs 20 brokerage dominated. So we use a per-trade cost FUNCTION
 # (dhan_futures.futures_round_trip_cost on notional), not a flat figure.
-DHAN_SYMBOLS = {"NIFTY50", "BANKNIFTY", "SENSEX"}
+DHAN_SYMBOLS = {"NIFTY50", "BANKNIFTY", "SENSEX", "FINNIFTY"}
 DHAN_ACCOUNT_SIZE = 200_000.0     # Rs — realistic for ~1 index-futures lot (margin ~Rs1.75L)
 try:
     from dhan_futures import futures_round_trip_cost as _fut_cost
@@ -1337,17 +1292,8 @@ try:
 except Exception:
     DHAN_FUT_COST_FN = None
 
-# Vantage RAW ECN CFD costs (gold/BTC/ETH on MT5). Two components:
-#  1) SPREAD — real bid/ask from the MT5 `spread` column (points) x point_value,
-#     crossed once per round trip. Raw ECN spreads are tight; data already reflects them.
-#  2) COMMISSION — Raw ECN charges ~$3/side/lot = $6 round-trip per lot. Converted
-#     to per-unit via the MT5 contract size (gold 100 oz/lot, BTC & ETH 1 coin/lot).
-# point_value = price per MT5 point (all three: digits=2 -> 0.01).
-CFD_COSTS = {
-    "XAUUSD+": {"point_value": 0.01, "contract_size": 100, "commission_lot_rt": 6.0, "min_spread_pts": 10},
-    "BTCUSD":  {"point_value": 0.01, "contract_size": 1,   "commission_lot_rt": 6.0, "min_spread_pts": 500},
-    "ETHUSD":  {"point_value": 0.01, "contract_size": 1,   "commission_lot_rt": 6.0, "min_spread_pts": 100},
-}
+# CFD symbols (gold/BTC/ETH) removed 2026-07 — AlphaEdge is Indian-indices only.
+CFD_COSTS = {}
 
 
 def run_daily_analysis(max_dd_pct: float = 20.0):

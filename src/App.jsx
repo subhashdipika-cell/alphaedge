@@ -3,14 +3,14 @@ import { createChart, CandlestickSeries } from "lightweight-charts";
 
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
 const ASSETS = [
-  { id: "BTCUSD",  label: "BTC/USD",  base: 97420,  type: "crypto",     exchange: "Binance" },
-  { id: "XAUUSD",  label: "XAU/USD",  base: 4538,   type: "commodity",  exchange: "OANDA"   },
-  { id: "ETHUSD",  label: "ETH/USD",  base: 3184,   type: "crypto",     exchange: "Binance" },
-  { id: "NIFTY50", label: "Nifty 50", base: 24800,  type: "index",      exchange: "NSE" },
+  { id: "NIFTY50",   label: "Nifty 50",   base: 25500, type: "index", exchange: "NSE" },
+  { id: "BANKNIFTY", label: "Bank Nifty", base: 57500, type: "index", exchange: "NSE" },
+  { id: "SENSEX",    label: "Sensex",     base: 83500, type: "index", exchange: "BSE" },
+  { id: "FINNIFTY",  label: "Fin Nifty",  base: 27200, type: "index", exchange: "NSE" },
 ];
 
-const PAGES = ["Dashboard","AI Signal","Backtest","Execution","Portfolio","Alerts","History","Money Mgt.","Calendar","MTF Confluence","Journal","Analytics","Options","Settings"];
-const PAGE_ICONS = ["▣","◈","⟳","⚡","◎","◉","◷","⚑","◫","◐","✎","◑","⊗","⚙"];
+const PAGES = ["Dashboard","AI Signal","Backtest","Execution","Alerts","History","Money Mgt.","Calendar","MTF Confluence","Journal","Analytics","Options","Settings"];
+const PAGE_ICONS = ["▣","◈","⟳","⚡","◉","◷","⚑","◫","◐","✎","◑","⊗","⚙"];
 
 // ─── STORAGE HELPERS (30-day persistent signal history) ───────────────────────
 const HISTORY_KEY = "signal-history";
@@ -205,10 +205,10 @@ function enforceSignalRules(parsed, { assetObj, livePrice, source = "AI" }) {
   const stopDistancePct = entry ? (risk / entry) * 100 : 0;
   const entryDriftPct = livePrice ? (Math.abs(entry - livePrice) / livePrice) * 100 : 0;
   const nature = String(parsed.nature || "Intraday");
-  const baseStopPct = assetId === "NIFTY50" ? 0.9 : assetId === "XAUUSD" ? 0.8 : assetId === "ETHUSD" ? 2.5 : 2.0; // BTC 2%, ETH 2.5%
+  const baseStopPct = assetId === "BANKNIFTY" ? 1.1 : 0.9;   // BankNifty runs wider intraday ranges
   const natureFactor = nature === "Swing" ? 2.5 : nature === "Scalping" ? 0.6 : 1;
   const maxStopPct = baseStopPct * natureFactor;
-  const maxEntryDriftPct = assetId === "NIFTY50" ? 0.8 : assetId === "XAUUSD" ? 0.9 : 2.2;
+  const maxEntryDriftPct = 0.8;
 
   // Auto-correct TP2 to minimum RR if AI undershoots — don't hard-reject the signal
   let finalTP2 = takeProfit2;
@@ -524,20 +524,6 @@ async function exportMonthlyToObsidian(opts = {}) {
   return { ok: failed.length === 0, written, failed };
 }
 
-// Link a saved AlphaEdge signal to the MT5 position it opened, so the History
-// page can pull the real outcome (win/loss + P&L) back from the terminal.
-async function attachMt5Ticket(id, result) {
-  try {
-    const ticket = result && (result.order || result.ticket);
-    if (!ticket) return;
-    const existing = await loadHistory();
-    const updated = existing.map(s => s.id === id
-      ? { ...s, mt5Ticket: ticket, mt5Status: result.account || (result.paper ? "paper" : "sent") }
-      : s);
-    saveHistory(updated);
-  } catch { /* non-fatal */ }
-}
-
 // Seed / offline-fallback geo alerts. Shown only until a live fetch succeeds
 // (or if every news source is unreachable). Real alerts come from fetchGeoAlerts().
 const GEO_ALERTS_FALLBACK = [
@@ -677,11 +663,6 @@ const STRATEGIES = [
   { id:"adaptive_sr",  name:"Adaptive S/R Pro",   cat:"SMC",     active:true,  winRate:0,  trades:0   },
 ];
 
-const OPEN_POSITIONS = [
-  { id:"P001", asset:"BTC/USD", dir:"LONG",  entry:96800,  current:97420, size:0.5,  sl:95200, tp:99400, pnl:310,  pct:2.4,  strategy:"ICT OB", time:"3h 22m" },
-  { id:"P002", asset:"XAU/USD", dir:"LONG",  entry:2330,   current:2341,  size:2,    sl:2310,  tp:2390,  pnl:22,   pct:0.47, strategy:"Macro",  time:"1h 08m" },
-  { id:"P003", asset:"ETH/USD", dir:"SHORT", entry:3210,   current:3184,  size:3,    sl:3290,  tp:3000,  pnl:78,   pct:0.81, strategy:"SMC BOS",time:"45m"    },
-];
 
 const CAT_COLOR = { ICT:"#f59e0b", SMC:"#06b6d4", Classic:"#a78bfa", Macro:"#34d399" };
 
@@ -879,145 +860,12 @@ async function sendTradeAlert(event, t) {
   try { return await sendTelegram(buildTradeAlert(event, t)); } catch { return { ok:false }; }
 }
 
-// ─── MT5 TERMINAL BRIDGE ──────────────────────────────────────────────────────
-// A browser can't talk to the MT5 terminal directly, so every signal is POSTed to
-// the bridge URL configured in Settings (MetaApi, or a local bridge beside MT5).
-// Paper mode uses the Demo account config; Live mode uses the Live account config.
-// Execution mode is the master switch (set from the Execution page tabs):
-//   "paper"     -> simulated only, nothing sent to MT5
-//   "mt5_demo"  -> orders sent to the MT5 Demo account
-//   "mt5_live"  -> orders sent to the MT5 Live (real) account
-function getExecMode() {
-  try {
-    const s = JSON.parse(localStorage.getItem("alphaedge_settings") || "{}");
-    if (s?.broker?.execMode) return s.broker.execMode;
-    return s?.broker?.mode === "live" ? "mt5_live" : "paper";  // back-compat
-  } catch { return "paper"; }
-}
-
-function setExecMode(mode) {
-  try {
-    const s = JSON.parse(localStorage.getItem("alphaedge_settings") || "{}");
-    s.broker = { ...(s.broker || {}), execMode: mode };
-    localStorage.setItem("alphaedge_settings", JSON.stringify(s));
-  } catch { /* ignore */ }
-}
-
+// ─── LOCAL DHAN/INDIA BRIDGE ─────────────────────────────────────────────────
+// AlphaEdge is decision-support + paper trading only: no orders are ever sent
+// to a broker. The local bridge exists purely as a data service (Dhan quotes,
+// candles, option chain) because the browser can't call api.dhan.co directly.
 // The local bridge always listens here; used as the default when no URL is set.
 const DEFAULT_BRIDGE_URL = "http://127.0.0.1:5000/signal";
-
-function getMT5Config() {
-  try {
-    const s = JSON.parse(localStorage.getItem("alphaedge_settings") || "{}");
-    const em = getExecMode();
-    if (em === "paper") return { execMode: "paper", account: "paper", paper: true };
-    const which = em === "mt5_live" ? "live" : "demo";
-    const acct = s?.broker?.mt5?.[which] || {};
-    // Default to the local bridge if no URL is configured (it runs on :5000).
-    return { execMode: em, account: which, paper: false, ...acct, bridgeUrl: acct.bridgeUrl || DEFAULT_BRIDGE_URL };
-  } catch { return { execMode: "paper", account: "paper", paper: true }; }
-}
-
-async function sendToMT5(parsed, assetLabel, tf) {
-  const cfg = getMT5Config();
-  // Paper Trade mode: simulated only — never send an order to MT5.
-  if (cfg.paper) return { ok:true, paper:true, skipped:true };
-  if (!cfg.bridgeUrl) return { ok:false, error:"No MT5 bridge URL set in Settings → MT5 Terminal" };
-
-  // ── Discipline guardrails — enforce on LIVE money only ──────────────────────
-  // In DEMO we deliberately send EVERY signal so the weekly/monthly dataset is
-  // complete (all sessions, all setups) for analysing trade quality. The
-  // Discipline Monitor still shows live status; real capital stays protected.
-  if (cfg.execMode === "mt5_live") {
-    try {
-      const gr = evaluateGuardrails(await loadHistory(), parsed, assetLabel);
-      if (gr.blocked) {
-        const reason = gr.violations[0];
-        console.warn("[AlphaEdge] LIVE trade blocked by guardrail:", gr.violations.join("; "));
-        return { ok:false, blocked:true, guardrail:true, error:`Blocked by discipline rule: ${reason}`, violations: gr.violations };
-      }
-    } catch { /* never let the guardrail check itself break execution */ }
-  }
-
-  // ── Apply Money Management rules (from the Money Mgt. page) ────────────────
-  const mm = getMoneyMgt();
-  const isBuy = parsed.bias === "BULLISH";
-  const entry = Number(parsed.entry) || 0;
-  // Stop loss: use the fixed SL distance if enabled, else the signal's own SL.
-  let stopLoss = Number(parsed.stopLoss) || 0;
-  if (mm.useSL && mm.slPoints > 0 && entry) {
-    stopLoss = isBuy ? entry - mm.slPoints : entry + mm.slPoints;
-  }
-  const slDist = entry && stopLoss ? Math.abs(entry - stopLoss) : 0;
-  // "Trail" mode: run until a far R:R (up to 1:50) with the trailing stop active.
-  const trailMode = mm.rr === "trail";
-  const rr = trailMode ? Math.min(50, Number(mm.trailMaxRR) || 10) : (Number(mm.rr) || 2);
-  const stepTrailEnabled = trailMode ? true : (mm.stepTrailEnabled !== false && !!mm.trailAfter1R);
-  const trailAfter1R = stepTrailEnabled;
-  const beTriggerR = Math.max(0.1, Number(mm.beTriggerR) || 1);
-  const trailStartR = Math.max(beTriggerR, Number(mm.trailStartR) || beTriggerR);
-  const trailStepPoints = Math.max(0, Number(mm.trailStepPoints) || 500);
-  const trailDistancePoints = Math.max(0, Number(mm.trailDistancePoints) || 500);
-  let takeProfit1 = Number(parsed.takeProfit1) || 0;
-  let takeProfit2 = Number(parsed.takeProfit2) || 0;
-  if (slDist && entry) {
-    takeProfit1 = isBuy ? entry + slDist * rr : entry - slDist * rr;
-    // In trail mode the single far target is the cap; otherwise TP2 extends a bit.
-    const rr2 = trailMode ? rr : rr * 1.5;
-    takeProfit2 = isBuy ? entry + slDist * rr2 : entry - slDist * rr2;
-  }
-
-  const order = {
-    account:    cfg.account,                 // "demo" | "live"
-    login:      cfg.login || "",
-    server:     cfg.server || "",
-    symbol:     assetLabel || "",
-    timeframe:  tf || "",
-    side:       parsed.bias === "BULLISH" ? "buy" : parsed.bias === "BEARISH" ? "sell" : "flat",
-    bias:       parsed.bias,
-    entry:      parsed.entry,
-    stopLoss,
-    takeProfit1,
-    takeProfit2,
-    lot:          mm.lotSize,        // fixed lot from Money Mgt.
-    rr,                              // reward:risk used
-    trailAfter1R,                    // bridge trails SL after the configured R trigger
-    stepTrailEnabled,
-    beTriggerR,
-    trailStartR,
-    trailStepPoints,
-    trailDistancePoints,
-    closeOppositeFirst: mm.closeOppositeFirst !== false,
-    _origSL:      parsed.stopLoss,
-    _origTP1:     parsed.takeProfit1,
-    riskReward: parsed.riskReward,
-    confidence: parsed.confidence,
-    nature:     parsed.nature,
-    setup:      parsed.setup || "",  // stamped into the MT5 order comment for attribution
-    time:       new Date().toISOString(),
-    source:     "AlphaEdge",
-  };
-  try {
-    const resp = await fetch(cfg.bridgeUrl, {
-      method:  "POST",
-      headers: { "Content-Type":"application/json" },
-      body:    JSON.stringify(order),
-    });
-    if (resp.ok) {
-      const data = await resp.json().catch(()=>({}));
-      // Fire a Telegram "trade placed" alert for real fills only (not dup/dry-run).
-      if (data && data.ok && data.order && !data.skipped && !data.dryRun) {
-        sendTradeAlert("placed", { venue:"MT5", symbol:assetLabel, side:order.side,
-          price:data.price ?? order.entry, lot:order.lot, sl:order.stopLoss, tp:order.takeProfit1, ticket:data.order });
-      }
-      return { ok:true, account:cfg.account, order:data.order, price:data.price, ...data };
-    }
-    const err = await resp.text().catch(()=> "");
-    return { ok:false, error:`HTTP ${resp.status}${err?` — ${err.slice(0,120)}`:""}` };
-  } catch(e) {
-    return { ok:false, error: e.message };
-  }
-}
 
 function buildTelegramMessage(parsed, assetLabel, tf) {
   const biasEmoji = parsed.bias === "BULLISH" ? "🟢" : parsed.bias === "BEARISH" ? "🔴" : "🟡";
@@ -1585,56 +1433,46 @@ function calcRSI(candles, period=14) {
 }
 
 // ─── OHLCV CANDLE FETCHER (per asset + timeframe) ────────────────────────────
-const BINANCE_TF = { "1m":"1m","5m":"5m","15m":"15m","1H":"1h","4H":"4h","1D":"1d","1W":"1w" };
-const YAHOO_TF   = { "1m":"1m","5m":"5m","15m":"15m","1H":"1h","4H":"1h","1D":"1d","1W":"1wk" };
-const YAHOO_RANGE= { "1m":"1d","5m":"5d","15m":"5d","1H":"1mo","4H":"3mo","1D":"6mo","1W":"2y" };
+// How many days of history to pull per timeframe (Dhan intraday keeps ~90 days).
+const DHAN_TF_DAYS = { "1m": 2, "5m": 5, "15m": 10, "1H": 30, "4H": 85, "1D": 365, "1W": 730 };
 
+// Merge fine candles into coarser buckets (4H from 1H, 1W from 1D).
+function aggregateCandles(rows, groupSize) {
+  const out = [];
+  for (let i = 0; i < rows.length; i += groupSize) {
+    const grp = rows.slice(i, i + groupSize);
+    if (!grp.length) break;
+    const open = grp[0].open, close = grp[grp.length - 1].close;
+    out.push({
+      ts:    grp[0].ts,
+      open, close,
+      high:  Math.max(...grp.map(c => c.high)),
+      low:   Math.min(...grp.map(c => c.low)),
+      vol:   grp.reduce((a, c) => a + (c.vol || 0), 0),
+      bull:  close >= open,
+    });
+  }
+  return out;
+}
+
+// All candles come from Dhan (via the bridge). 4H/1W aggregate from 1H/1D.
 async function fetchCandles(assetId, tf) {
   try {
-    // ── Crypto: use Binance ──────────────────────────────────────────────────
-    if (assetId === "BTCUSD" || assetId === "ETHUSD") {
-      const symbol = assetId === "BTCUSD" ? "BTCUSDT" : "ETHUSDT";
-      const interval = BINANCE_TF[tf] || "1h";
-      const limit = tf === "1W" ? 52 : tf === "1D" ? 90 : tf === "4H" ? 90 : 120;
-      const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
-      const resp = await fetch(url, { signal: AbortSignal.timeout(6000) });
-      if (!resp.ok) throw new Error("Binance error");
-      const raw = await resp.json();
-      // Binance klines: [openTime, open, high, low, close, volume, ...]
-      return raw.map(k => ({
-        ts:    k[0],
-        open:  parseFloat(k[1]),
-        high:  parseFloat(k[2]),
-        low:   parseFloat(k[3]),
-        close: parseFloat(k[4]),
-        vol:   parseFloat(k[5]),
-        bull:  parseFloat(k[4]) >= parseFloat(k[1]),
-      }));
-    }
-
-    // ── Gold & Nifty: use Yahoo Finance ─────────────────────────────────────
-    const yahooSymbol = assetId === "XAUUSD" ? "GC%3DF" : "%5ENSEI";
-    const interval    = YAHOO_TF[tf]    || "1h";
-    const range       = YAHOO_RANGE[tf] || "1mo";
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooSymbol}?interval=${interval}&range=${range}`;
-    const resp = await fetch(url, { signal: AbortSignal.timeout(6000) });
-    if (!resp.ok) throw new Error("Yahoo error");
-    const data = await resp.json();
-    const result = data?.chart?.result?.[0];
-    if (!result) throw new Error("No data");
-    const { timestamp, indicators } = result;
-    const q = indicators.quote[0];
-    return timestamp.map((ts, i) => ({
-      ts:    ts * 1000,
-      open:  q.open[i]  || 0,
-      high:  q.high[i]  || 0,
-      low:   q.low[i]   || 0,
-      close: q.close[i] || 0,
-      vol:   q.volume[i]|| 0,
-      bull:  (q.close[i] || 0) >= (q.open[i] || 0),
-    })).filter(c => c.open > 0 && c.close > 0);
-
-  } catch(e) {
+    const nativeTf = tf === "4H" ? "1H" : tf === "1W" ? "1D" : tf;
+    const days     = DHAN_TF_DAYS[tf] || 5;
+    const today    = new Date();
+    const from     = new Date(today.getTime() - days * 86400000);
+    const fmt      = d => d.toISOString().slice(0, 10);
+    const rows     = await fetchDhanHistorical(assetId, nativeTf, fmt(from), fmt(today));
+    if (!rows || !rows.length) return null;
+    const candles = rows.map(r => ({
+      open: r.open, high: r.high, low: r.low, close: r.close,
+      bull: r.close >= r.open, vol: r.volume || 0, ts: new Date(r.time).getTime(),
+    }));
+    if (tf === "4H") return aggregateCandles(candles, 4);
+    if (tf === "1W") return aggregateCandles(candles, 5);
+    return candles;
+  } catch {
     return null; // null = fetch failed, keep existing candles
   }
 }
@@ -2306,7 +2144,7 @@ function AdvancedICTChart({candles: propCandles, asset, price, change}) {
               Fetching {tf} candles...
             </div>
             <div style={{fontSize:10,color:'#94a3b8',fontFamily:'monospace'}}>
-              {asset==='BTCUSD'||asset==='ETHUSD'?'Binance API':'Yahoo Finance'}
+              Dhan (via local bridge)
             </div>
           </div>
         )}
@@ -2478,10 +2316,10 @@ function EquityCurve({curve}) {
 
 // ─── TRADINGVIEW ADVANCED CHART ───────────────────────────────────────────────
 const TV_SYMBOLS = {
-  BTCUSD:  "BINANCE:BTCUSDT",
-  XAUUSD:  "OANDA:XAUUSD",
-  ETHUSD:  "BINANCE:ETHUSDT",
-  NIFTY50: "NSE:NIFTY",
+  NIFTY50:   "NSE:NIFTY",
+  BANKNIFTY: "NSE:BANKNIFTY",
+  SENSEX:    "BSE:SENSEX",
+  FINNIFTY:  "NSE:CNXFINANCE",
 };
 const TV_TF_MAP = {
   "1m":"1","5m":"5","15m":"15","1H":"60","4H":"240","1D":"D","1W":"W",
@@ -2492,7 +2330,7 @@ function TradingViewChart({ asset, price, change }) {
   const [tf, setTf]   = useState("60");
   const [studies, setStudies] = useState(true);
 
-  const symbol  = TV_SYMBOLS[asset] || "BINANCE:BTCUSDT";
+  const symbol  = TV_SYMBOLS[asset] || "NSE:NIFTY";
   const assetObj = ASSETS.find(a => a.id === asset) || ASSETS[0];
   const pos      = change >= 0;
 
@@ -2703,7 +2541,7 @@ function DhanLightweightChart({ candles, asset, price, change, marketOpen=true }
 }
 
 // ─── CHART SWITCHER ───────────────────────────────────────────────────────────
-const DHAN_CHART_ASSETS = ["NIFTY50", "BANKNIFTY", "SENSEX"];
+const DHAN_CHART_ASSETS = ["NIFTY50", "BANKNIFTY", "SENSEX", "FINNIFTY"];
 function ChartSwitcher({ asset, price, change, candles, marketOpen=true }) {
   const [mode, setMode] = useState("tv"); // "tv" | "ict"
   const isDhan = DHAN_CHART_ASSETS.includes(asset);
@@ -2896,12 +2734,7 @@ function screenAsset(assetId, livePrice, dayChangePct = null) {
 
   // Session alignment bonus
   const NSE_OPEN = utcH>=3.75 && utcH<10;
-  const LONDON   = utcH>=7    && utcH<16;
-  const NY       = utcH>=12   && utcH<21;
-  if (assetId==="NIFTY50" && NSE_OPEN) { score += 10; reasons.push("NSE session"); }
-  if (assetId==="XAUUSD"  && LONDON)   { score += 8;  reasons.push("London Gold session"); }
-  if (assetId==="BTCUSD"  && NY)       { score += 8;  reasons.push("NY Crypto session"); }
-  if (assetId==="ETHUSD"  && NY)       { score += 8;  reasons.push("NY Crypto session"); }
+  if (NSE_OPEN) { score += 10; reasons.push("NSE session"); }
 
   // Bias from today's momentum. Flat day (<0.1%) = NEUTRAL = no signal —
   // a coin-flip direction is not a setup.
@@ -2967,27 +2800,13 @@ function isStrategyActive(id, assetId) {
 }
 
 // ─── MONEY MANAGEMENT ─────────────────────────────────────────────────────────
-// User's position-sizing & risk rules, applied to every order before it's sent.
+// User's position-sizing & risk rules, applied to every paper trade plan.
 const MONEY_MGT_DEFAULTS = {
   capital: 400000,      // account capital (₹) — default trading capital
-  lotSize: 0.01,        // fixed lot size sent to MT5
   useSL: false,         // if true, force the fixed SL distance below
   slPoints: 50,         // fixed stop-loss distance in price points
   rr: 2,                // reward:risk multiple (1, 1.5, 2, 2.5) or "trail"
   trailMaxRR: 3,        // in "trail" mode, run until this R:R (up to 50)
-  // Step-trailing default OFF (2026-07-05): strategy-lab full-history grid
-  // tested 5 TSL ladders vs fixed SL/TP across 42 strategy×instrument combos —
-  // NO ladder beat Fixed (TSL cost −154% net across 60 combos, hurt in 34).
-  // Reversion/pullback entries retrace through entry before TP, so breakeven
-  // stops scratch winners. Re-enable per-trade from Money Mgt if wanted.
-  trailAfter1R: false,  // legacy toggle: move SL to breakeven & trail after 1:1
-  stepTrailEnabled: false,
-  beTriggerR: 1,
-  trailStartR: 1,
-  trailStepPoints: 500,
-  trailDistancePoints: 500,
-  closeOppositeFirst: true,
-  fetchCapitalFromMT5: true,
 };
 function getMoneyMgt() {
   try { return { ...MONEY_MGT_DEFAULTS, ...JSON.parse(localStorage.getItem("alphaedge_money_mgt") || "{}") }; }
@@ -3040,33 +2859,6 @@ function isIndianInstrument(asset) {
   return /NIFTY|BANKNIFTY|SENSEX|BANKEX|FINNIFTY|MIDCP/.test(s);
 }
 
-// Broker-realized per-setup performance (from the 'AE <setup>' MT5 order
-// comments) — the closed learning loop for signal generation: fetched from
-// the bridge (1h cache) and injected into the auto-screen AI prompt so it
-// favors setups that pay at REAL fills and avoids ones that lose. The
-// cross-app audit showed theoretical R overstates results 3-8x vs broker.
-let SETUP_PERF = null;
-let SETUP_PERF_TS = 0;
-async function fetchSetupPerformance() {
-  if (SETUP_PERF && Date.now() - SETUP_PERF_TS < 60 * 60 * 1000) return SETUP_PERF;
-  try {
-    const base = (getAnyBridgeUrl() || "").replace(/\/signal\/?$/, "");
-    if (!base) return SETUP_PERF;
-    const r = await fetch(`${base}/setups/performance?days=30`, { signal: AbortSignal.timeout(8000) });
-    const d = await r.json();
-    if (d && d.ok) { SETUP_PERF = d; SETUP_PERF_TS = Date.now(); }
-  } catch { /* bridge offline — keep last known */ }
-  return SETUP_PERF;
-}
-function setupPerfPromptSection() {
-  const rows = (SETUP_PERF?.setups || []).filter(s => s.trades >= 3 && s.setup !== "(untagged)");
-  if (!rows.length) return "";
-  const lines = rows.map(s => `- ${s.setup}: ${s.trades} trades, ${s.winRate}% win, net $${s.net}`);
-  return `\nBROKER-REALIZED SETUP PERFORMANCE (actual MT5 fills, last 30 days — trust this over theoretical win rates):\n`
-       + lines.join("\n")
-       + `\nPrefer setups with positive realized net. Reject or reduce confidence for setups losing at real fills.\n`;
-}
-
 // NSE holiday info — fetched once per session from the bridge, which refreshes
 // it daily from Dhan's public holiday calendar. Read synchronously by
 // evaluateGuardrails via this module cache.
@@ -3099,29 +2891,6 @@ function marketSession(asset, at = null) {
     if (m < 615)  return { session: "NSE Open (volatile)", prime: false, quality: "avoid" };  // 09:15–10:15
     if (m >= 840) return { session: "NSE Afternoon",       prime: true,  quality: "prime" };  // 14:00–15:30
     return { session: "NSE Midday", prime: false, quality: "ok" };
-  }
-  if (/XAU|GOLD/.test(a)) {
-    // Vantage XAUUSD+ hours, verified from actual M1 bar data (server UTC+3):
-    // daily open 03:30 IST → close 02:27 IST next day (break 02:30–03:30 IST).
-    // Normal Fridays close Sat ~02:26 IST, BUT US-holiday Fridays close 22:30
-    // IST unannounced (Juneteenth 19-Jun, July-4th 3-Jul-26) — so Friday from
-    // 21:45 IST is treated as closed; the bridge blocks new gold entries then
-    // and flattens open gold at 22:15 IST.
-    if (dow === 6 && m > 150)   return { session: "Closed (weekend)", prime: false, quality: "closed" };
-    if (dow === 0)              return { session: "Closed (weekend)", prime: false, quality: "closed" };
-    if (dow === 1 && m < 210)   return { session: "Closed (weekend)", prime: false, quality: "closed" }; // Mon opens 03:30 IST
-    if (dow === 5 && m >= 1305) return { session: "Closed (Fri gold cutoff)", prime: false, quality: "closed" }; // 21:45 IST
-    if (m >= 150 && m < 210)    return { session: "Closed (daily break)", prime: false, quality: "closed" }; // 02:30–03:30 IST
-    if (m >= 1140 && m <= 1290) return { session: "London–NY Overlap", prime: true,  quality: "prime" }; // 19:00–21:30 ⭐
-    if (m >= 750  && m < 1140)  return { session: "London",            prime: false, quality: "ok"    }; // 12:30–19:00
-    if (m > 1290 || m < 150)    return { session: "New York",          prime: false, quality: "ok"    }; // 21:30–02:30
-    if (m >= 330  && m < 750)   return { session: "Asian (thin)",      prime: false, quality: "thin"  }; // 05:30–12:30
-    return { session: "Off-hours (thin)", prime: false, quality: "thin" };
-  }
-  // Crypto — 24/7; treat US/Europe afternoon as the busier window
-  if (/BTC|ETH/.test(a)) {
-    if (m >= 750 && m <= 1290) return { session: "Active (EU/US)", prime: false, quality: "ok" };
-    return { session: "24/7", prime: false, quality: "ok" };
   }
   return { session: "", prime: false, quality: "ok" };
 }
@@ -3223,7 +2992,6 @@ function AutoSignalEngine({ prices, changes, enabled, onSignalSaved }) {
     if (!hasTelegram() || !hasAI()) return;
 
     setStatus("scanning");
-    await fetchSetupPerformance();   // refresh realized per-setup stats (1h cache)
     const log = [];
 
     for (const assetObj of ASSETS) {
@@ -3240,8 +3008,8 @@ function AutoSignalEngine({ prices, changes, enabled, onSignalSaved }) {
       // ── AI Validation ──────────────────────────────────────────────────────
       setStatus(`validating ${assetObj.label}...`);
 
-      const sym    = assetObj.id==="NIFTY50"?"₹":"$";
-      const slPct  = assetObj.id==="NIFTY50"?0.6:assetObj.id==="XAUUSD"?0.5:1.2;
+      const sym    = "₹";
+      const slPct  = assetObj.id==="BANKNIFTY" ? 0.8 : 0.6;   // BankNifty runs wider intraday ranges
       const tp1Pct = slPct*1.5, tp2Pct=slPct*3.0;
       const exEntry= Math.round(livePrice);
       const exSL   = Math.round(livePrice*(1-(screen.bias==="BULLISH"?slPct:-slPct)/100));
@@ -3267,7 +3035,6 @@ Reasons: ${screen.reasons.join(", ")}
 Kill Zone: ${screen.activeKZ||"None"}
 ${autoWikiSection}
 ${stratContext}
-${setupPerfPromptSection()}
 ${ruleContext}
 
 TASK: Validate if this is a HIGH PROBABILITY trade. Only approve confidence >= 75.
@@ -3325,7 +3092,7 @@ JSON only, no markdown:`;
           learningAdjustments: guarded.learningAdjustments,
           outcome:     "pending",
           source:      "Auto-Screen",
-          tradeType:   getExecMode()==="mt5_live" ? "Real" : getExecMode()==="mt5_demo" ? "Demo" : "Paper",
+          tradeType:   "Paper",
           session:     marketSession(assetObj.label).session,
           primeWindow: marketSession(assetObj.label).prime,
           sessionQuality: marketSession(assetObj.label).quality,
@@ -3333,19 +3100,15 @@ JSON only, no markdown:`;
         const updated = await appendSignal(record);
         if (onSignalSaved) onSignalSaved(updated);
 
-        // No Telegram on signal generation — alerts fire only on trade placed/closed.
-        // Auto-screened signal still routes to the MT5 bridge (which alerts on fill).
-        const autoMt5 = await sendToMT5(guarded, assetObj.label, record.timeframe);
-        await attachMt5Ticket(record.id, autoMt5);
         setLastSignal({
           asset:      assetObj.label,
           confidence: guarded.confidence,
           nature:     guarded.nature,
           bias:       guarded.bias,
-          sent:       autoMt5.ok,
+          sent:       true,
           time:       new Date(),
         });
-        setStatus(autoMt5.ok ? "sent" : "validated-nosend");
+        setStatus("saved");
         setTimeout(()=>setStatus("idle"), 10000);
         // Only one signal per scan cycle
         break;
@@ -3629,36 +3392,32 @@ function DashboardPage({prices, changes, candles, sources={}, activeAsset, setAc
 
   const fmtP=(id,p)=>{
     const a=ASSETS.find(x=>x.id===id)||asset;
-    const sym=a.id==="NIFTY50"?"":"$";
-    const sfx=a.id==="NIFTY50"?" pts":"";
+    const sym="";
+    const sfx=" pts";
     if(p>=10000) return `${sym}${(p/1000).toFixed(2)}k${sfx}`;
     if(p>=100)   return `${sym}${p.toFixed(1)}${sfx}`;
     return `${sym}${p.toFixed(2)}${sfx}`;
   };
 
   const ASSET_SIGNALS={
-    BTCUSD:[
-      {dir:"BUY",   nature:"Intraday", name:"ICT OB Bounce",        conf:87, strategy:"ICT",   entry:96800, sl:95200, tp:99400},
-      {dir:"BUY",   nature:"Swing",    name:"SMC MSS + FVG",        conf:74, strategy:"SMC",   entry:97100, sl:95800, tp:100200},
-      {dir:"SELL",  nature:"Intraday", name:"Geo-risk Hedge",       conf:61, strategy:"Macro", entry:97500, sl:98800, tp:94000},
-      {dir:"NEUTRAL",nature:"Scalping",name:"RSI Divergence",       conf:55, strategy:"Classic",entry:null,  sl:null,  tp:null},
-    ],
-    XAUUSD:[
-      {dir:"BUY",   nature:"Swing",    name:"Safe-haven Bid",       conf:91, strategy:"Macro", entry:4520,  sl:4480,  tp:4620},
-      {dir:"BUY",   nature:"Intraday", name:"ICT OB Weekly",        conf:78, strategy:"ICT",   entry:4510,  sl:4470,  tp:4600},
-    ],
-    ETHUSD:[
-      {dir:"SELL",  nature:"Scalping", name:"Liquidity Sweep",      conf:69, strategy:"ICT",   entry:3210,  sl:3290,  tp:3050},
-      {dir:"SELL",  nature:"Intraday", name:"CHoCH Bearish",        conf:63, strategy:"SMC",   entry:3195,  sl:3260,  tp:3000},
-    ],
     NIFTY50:[
-      {dir:"BUY",   nature:"Intraday", name:"RBI Rate Hold Bounce", conf:82, strategy:"Macro", entry:24650, sl:24300, tp:25200},
-      {dir:"BUY",   nature:"Intraday", name:"FII Inflow OB",        conf:76, strategy:"ICT",   entry:24700, sl:24400, tp:25400},
-      {dir:"BUY",   nature:"Scalping", name:"NSE Open Kill Zone",   conf:71, strategy:"ICT",   entry:24720, sl:24450, tp:25100},
-      {dir:"SELL",  nature:"Swing",    name:"Budget Risk Hedge",    conf:55, strategy:"Macro", entry:24900, sl:25200, tp:24100},
+      {dir:"BUY",   nature:"Intraday", name:"RBI Rate Hold Bounce", conf:82, strategy:"Macro", entry:25450, sl:25300, tp:25750},
+      {dir:"BUY",   nature:"Intraday", name:"FII Inflow OB",        conf:76, strategy:"ICT",   entry:25480, sl:25320, tp:25820},
+      {dir:"BUY",   nature:"Scalping", name:"NSE Open Kill Zone",   conf:71, strategy:"ICT",   entry:25500, sl:25360, tp:25720},
+      {dir:"SELL",  nature:"Swing",    name:"Budget Risk Hedge",    conf:55, strategy:"Macro", entry:25600, sl:25800, tp:25200},
+    ],
+    BANKNIFTY:[
+      {dir:"BUY",   nature:"Intraday", name:"PSU Bank Momentum OB", conf:78, strategy:"ICT",   entry:57400, sl:57000, tp:58300},
+      {dir:"SELL",  nature:"Scalping", name:"Liquidity Sweep High", conf:66, strategy:"SMC",   entry:57700, sl:58050, tp:57000},
+    ],
+    SENSEX:[
+      {dir:"BUY",   nature:"Intraday", name:"BSE Range Breakout",   conf:73, strategy:"Classic", entry:83400, sl:82950, tp:84300},
+    ],
+    FINNIFTY:[
+      {dir:"BUY",   nature:"Intraday", name:"Financials CHoCH Up",  conf:70, strategy:"SMC",   entry:27150, sl:26980, tp:27500},
     ],
   };
-  const signals=ASSET_SIGNALS[activeAsset]||ASSET_SIGNALS.BTCUSD;
+  const signals=ASSET_SIGNALS[activeAsset]||ASSET_SIGNALS.NIFTY50;
 
   return (
     <div style={{display:"flex",gap:10,height:"100%",overflow:"hidden"}}>
@@ -3799,13 +3558,12 @@ function DashboardPage({prices, changes, candles, sources={}, activeAsset, setAc
 function AISignalPage({ onSignalSaved, prices = {} }) {
   const [loading, setLoading]=useState(false);
   const [result, setResult]=useState(null);
-  const [asset, setAsset]=useState("BTCUSD");
+  const [asset, setAsset]=useState("NIFTY50");
   const [tf, setTf]=useState("1H");
   const [error, setError]=useState(null);
   const [saved, setSaved]=useState(false);
   const [tgStatus, setTgStatus]=useState(null);
   const [tgEnabled, setTgEnabled]=useState(true);
-  const [mt5Status, setMt5Status]=useState(null);
   const [strategy, setStrategy]=useState("ict_smc"); // "ict_smc" | "eagle_eye"
 
   // ── Strategy Definitions ───────────────────────────────────────────────────
@@ -3841,7 +3599,7 @@ function AISignalPage({ onSignalSaved, prices = {} }) {
     const wikiSection = wikiCtx
       ? `\n\n===== TRADER'S OWN WIKI / STRATEGY RULEBOOK =====\nThe trader has documented their personal edge in this knowledge base. Apply these rules with HIGHEST priority — they override generic ICT/SMC defaults:\n\n${wikiCtx}\n===== END OF WIKI =====\n`
       : "";
-    const slRange  = asset==="NIFTY50" ? 0.6 : asset==="XAUUSD" ? 0.4 : asset==="ETHUSD" ? 1.2 : 1.5;
+    const slRange  = asset==="BANKNIFTY" ? 0.8 : 0.6;
     const tp1Range = slRange * 1.5;
     const tp2Range = slRange * 3;
     const pct = (p, v) => Math.round(p * (1 + v/100));
@@ -3855,7 +3613,7 @@ function AISignalPage({ onSignalSaved, prices = {} }) {
       const roundLevel   = Math.round(livePrice / p.roundStep) * p.roundStep;
       const nextRound    = roundLevel + p.roundStep;
       const prevRound    = roundLevel - p.roundStep;
-      const atrEstimate  = asset==="NIFTY50" ? livePrice*0.006 : asset==="XAUUSD" ? livePrice*0.005 : asset==="BTCUSD" ? livePrice*0.012 : livePrice*0.010;
+      const atrEstimate  = asset==="BANKNIFTY" ? livePrice*0.008 : livePrice*0.006;
       const sl_atr       = Math.round(atrEstimate * p.atrMult);
       const liveRounded  = `${sym}${livePrice.toLocaleString(undefined,{maximumFractionDigits:2})}`;
 
@@ -3990,7 +3748,7 @@ Respond ONLY with the JSON object:`;
         learningAdjustments: guarded.learningAdjustments,
         outcome: "pending",
         source: strategy==="eagle_eye" ? `Eagle's Eye (${provider})` : `AI ICT/SMC (${provider})`,
-        tradeType: getExecMode()==="mt5_live" ? "Real" : getExecMode()==="mt5_demo" ? "Demo" : "Paper",
+        tradeType: "Paper",
         session:     marketSession(assetObj.label).session,
         primeWindow: marketSession(assetObj.label).prime,
         sessionQuality: marketSession(assetObj.label).quality,
@@ -3998,21 +3756,6 @@ Respond ONLY with the JSON object:`;
       const updated = await appendSignal(record);
       setSaved(true);
       if (onSignalSaved) onSignalSaved(updated);
-
-      // ── Route EVERY signal according to the Execution-page mode ─────────────
-      setMt5Status("sending");
-      const mt5Result = await sendToMT5(guarded, assetObj.label, tf);
-      await attachMt5Ticket(record.id, mt5Result);
-      setMt5Status(
-        mt5Result.paper ? "paper"
-        : mt5Result.ok  ? `sent:${mt5Result.account}`
-        : mt5Result.guarded || mt5Result.guardrail ? `blocked:${mt5Result.error||""}`
-        : `failed:${mt5Result.error||""}`
-      );
-      setTimeout(()=>setMt5Status(null), 10000);
-
-      // Telegram alerts are sent only when a trade is actually PLACED/CLOSED
-      // (handled in sendToMT5 + the trade watcher), not on signal generation.
     } catch(e) {
       if(e.message==="NO_KEY")
         setError(`No API key set. Go to Settings → select ${getAIProvider().toUpperCase()} → paste your key → Save Settings.`);
@@ -4242,42 +3985,6 @@ Respond ONLY with the JSON object:`;
                 </div>}
               </div>
             )}
-            {/* MT5 terminal broadcast status */}
-            {mt5Status==="paper" && (
-              <div style={{background:"#0a1e35",border:"0.5px solid #2563eb40",borderRadius:8,padding:"8px 14px",display:"flex",alignItems:"center",gap:8}}>
-                <span style={{fontSize:14}}>📝</span>
-                <span style={{fontSize:11,color:"#60a5fa",fontFamily:"monospace"}}>Paper Trade mode — signal logged, no MT5 order placed</span>
-              </div>
-            )}
-            {mt5Status==="sending" && (
-              <div style={{background:"#0a1e35",border:"0.5px solid #2563eb40",borderRadius:8,padding:"8px 14px",display:"flex",alignItems:"center",gap:8}}>
-                <span style={{fontSize:14,animation:"spin 1s linear infinite",display:"inline-block"}}>◌</span>
-                <span style={{fontSize:11,color:"#60a5fa",fontFamily:"monospace"}}>Sending order to MT5 terminal...</span>
-              </div>
-            )}
-            {mt5Status&&mt5Status.startsWith("sent") && (
-              <div style={{background:"#052e16",border:"0.5px solid #22c55e60",borderRadius:8,padding:"8px 14px",display:"flex",alignItems:"center",gap:8}}>
-                <span style={{fontSize:14}}>📈</span>
-                <span style={{fontSize:11,color:"#22c55e",fontFamily:"monospace"}}>✓ Signal sent to MT5 ({mt5Status.replace("sent:","")} account)</span>
-              </div>
-            )}
-            {mt5Status&&mt5Status.startsWith("failed") && (
-              <div style={{background:"#1a0a00",border:"0.5px solid #f59e0b40",borderRadius:8,padding:"8px 12px"}}>
-                <div style={{fontSize:11,color:"#f59e0b",fontFamily:"monospace",marginBottom:4}}>⚠️ MT5 not sent</div>
-                <div style={{fontSize:10,color:"#94a3b8",fontFamily:"monospace",wordBreak:"break-all"}}>
-                  {mt5Status.replace("failed:","") || "Add an MT5 Bridge URL in Settings → MT5 Terminal"}
-                </div>
-              </div>
-            )}
-            {mt5Status&&mt5Status.startsWith("blocked") && (
-              <div style={{background:"#1a0000",border:"0.5px solid #ef444450",borderRadius:8,padding:"8px 12px"}}>
-                <div style={{fontSize:11,color:"#ef4444",fontFamily:"monospace",marginBottom:4}}>🛑 Trade blocked by Discipline guardrail</div>
-                <div style={{fontSize:10,color:"#fca5a5",fontFamily:"monospace",wordBreak:"break-word"}}>
-                  {mt5Status.replace("blocked:","").replace("Blocked by discipline rule: ","")}
-                </div>
-                <div style={{fontSize:9,color:"#94a3b8",marginTop:4}}>Signal saved to History, but not executed. Adjust in Settings → Discipline.</div>
-              </div>
-            )}
             <div style={{background:`linear-gradient(135deg,${biasColor}15,${biasColor}05)`,border:`0.5px solid ${biasColor}40`,borderRadius:12,padding:16,display:"flex",alignItems:"center",gap:16}}>
               <div style={{fontSize:40,fontWeight:900,color:biasColor,fontFamily:"monospace",lineHeight:1}}>
                 {result.bias==="BULLISH"?"▲":result.bias==="BEARISH"?"▼":"◆"}
@@ -4482,7 +4189,7 @@ function realCandleBacktest(candles, { lots=1, lotSize=1, brokerageRT=0, capital
 
 function BacktestPage({candles}) {
   const [stratId,setStratId]=useState("ict_ob");
-  const [assetId,setAssetId]=useState("BTCUSD");
+  const [assetId,setAssetId]=useState("NIFTY50");
   const [period,setPeriod]=useState(300);
   const [running,setRunning]=useState(false);
   const [results,setResults]=useState(null);
@@ -4848,296 +4555,18 @@ function BacktestPage({candles}) {
   );
 }
 
-function ExecutionPage({prices}) {
-  const [orders,setOrders]=useState([
-    {id:"ORD001",asset:"BTC/USD",dir:"LONG", entry:96800,current:97420,size:0.5,sl:95200,tp:99400,pnl:310, pct:2.4, status:"open",  strategy:"ICT OB"},
-    {id:"ORD002",asset:"XAU/USD",dir:"LONG", entry:2330, current:2341, size:2,  sl:2310, tp:2390, pnl:22,  pct:0.47,status:"open",  strategy:"Macro"},
-    {id:"ORD003",asset:"ETH/USD",dir:"SHORT",entry:3210, current:3184, size:3,  sl:3290, tp:3000, pnl:78,  pct:0.81,status:"open",  strategy:"SMC BOS"},
-    {id:"ORD004",asset:"BTC/USD",dir:"LONG", entry:94200,current:97420,size:0.3,sl:92000,tp:98000,pnl:966, pct:3.4, status:"closed",strategy:"FVG"},
-    {id:"ORD005",asset:"ETH/USD", dir:"LONG", entry:3050, current:3184, size:2,   sl:2950, tp:3300, pnl:268, pct:4.4, status:"closed",strategy:"FVG Fill"},
-  ]);
-  const [newOrder,setNewOrder]=useState({asset:"BTCUSD",dir:"BUY",size:"",sl:"",tp:"",strategy:"ICT OB"});
-  const [showForm,setShowForm]=useState(false);
-  const [apiMode,setApiMode]=useState(getExecMode());
-
-  // ── MT5 bridge connectivity — pings the Bridge URL for the selected mode ──
-  const [bridge,setBridge]=useState({state:"checking"});
-  useEffect(()=>{
-    let stop=false;
-    const ping=async()=>{
-      const cfg=getMT5Config();
-      if(cfg.paper){ if(!stop) setBridge({state:"paper"}); return; }
-      if(!cfg.bridgeUrl){ if(!stop) setBridge({state:"unconfigured"}); return; }
-      try{
-        const r=await fetch(cfg.bridgeUrl,{method:"GET",signal:AbortSignal.timeout(4000)});
-        const d=await r.json().catch(()=>({}));
-        if(!stop) setBridge(r.ok?{state:"connected",dryRun:d.dryRun}:{state:"offline"});
-      }catch{ if(!stop) setBridge({state:"offline"}); }
-    };
-    ping();
-    const t=setInterval(ping,10000);
-    return ()=>{ stop=true; clearInterval(t); };
-  },[apiMode]);
-
-  const open=orders.filter(o=>o.status==="open");
-  const closed=orders.filter(o=>o.status==="closed");
-  const totalPnl=open.reduce((s,o)=>s+o.pnl,0);
-
+// Placeholder until the Paper Trades blotter lands (revamp Phase 7): AlphaEdge
+// is decision-support + paper only — no broker execution.
+function ExecutionPage() {
   return (
-    <div style={{height:"100%",overflow:"auto"}}>
-      <div style={{maxWidth:900,margin:"0 auto",display:"flex",flexDirection:"column",gap:10}}>
-        {/* Controls */}
-        <div style={{background:"#0a1628",border:"0.5px solid #1e3a5a",borderRadius:12,padding:14,display:"flex",gap:12,alignItems:"center"}}>
-          <div style={{fontSize:9,color:"#94a3b8",letterSpacing:"0.1em"}}>EXECUTION MODE</div>
-          <div style={{display:"flex",gap:4}}>
-            {[
-              {id:"paper",    label:"Paper Trade", c:"#60a5fa"},
-              {id:"mt5_demo", label:"MT5 Demo",    c:"#22c55e"},
-              {id:"mt5_live", label:"MT5 Live",    c:"#ef4444"},
-            ].map(m=>(
-              <span key={m.id} onClick={()=>{ setApiMode(m.id); setExecMode(m.id); }}
-                style={{padding:"5px 12px",borderRadius:6,fontSize:10,cursor:"pointer",fontFamily:"monospace",fontWeight:apiMode===m.id?700:400,
-                  background:apiMode===m.id?m.c+"22":"#060d17",color:apiMode===m.id?m.c:"#94a3b8",
-                  border:`0.5px solid ${apiMode===m.id?m.c:"#1e3a5a"}`}}>{m.label}</span>
-            ))}
-          </div>
-          {apiMode==="mt5_live"&&<span style={{fontSize:9,color:"#ef4444",background:"#1a0000",padding:"2px 8px",borderRadius:4,border:"0.5px solid #ef444430"}}>⚠ REAL FUNDS</span>}
-          {/* MT5 bridge status */}
-          {(()=>{
-            const map={
-              checking:    {c:"#94a3b8", t:"MT5 bridge: checking…"},
-              connected:   {c:"#22c55e", t:`MT5 bridge: connected${bridge.dryRun?" · DRY-RUN":""}`},
-              offline:     {c:"#ef4444", t:"MT5 bridge: offline"},
-              unconfigured:{c:"#f59e0b", t:"MT5 bridge: not set"},
-              paper:       {c:"#60a5fa", t:"Paper mode — MT5 not used"},
-            };
-            const s=map[bridge.state]||map.checking;
-            return (
-              <span title="Pings the Bridge / API URL set in Settings → MT5 Terminal"
-                style={{display:"flex",alignItems:"center",gap:6,fontSize:10,fontFamily:"monospace",
-                  color:s.c,background:"#060d17",border:`0.5px solid ${s.c}40`,borderRadius:6,padding:"4px 10px"}}>
-                <span style={{width:7,height:7,borderRadius:"50%",background:s.c,
-                  boxShadow:bridge.state==="connected"?`0 0 6px ${s.c}`:"none"}}/>
-                {s.t}
-              </span>
-            );
-          })()}
-          <div style={{marginLeft:"auto",display:"flex",gap:6}}>
-            <div style={{textAlign:"right"}}>
-              <div style={{fontSize:9,color:"#94a3b8"}}>OPEN PNL</div>
-              <div style={{fontSize:16,fontWeight:800,color:totalPnl>=0?"#22c55e":"#ef4444",fontFamily:"monospace"}}>{totalPnl>=0?"+":""}${totalPnl.toFixed(0)}</div>
-            </div>
-            <button onClick={()=>setShowForm(f=>!f)}
-              style={{padding:"8px 16px",background:"linear-gradient(135deg,#1d4ed8,#7c3aed)",border:"none",borderRadius:8,color:"white",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"monospace"}}>
-              ⚡ NEW ORDER
-            </button>
-          </div>
-        </div>
-
-        {/* New order form */}
-        {showForm&&(
-          <div style={{background:"#0a1628",border:"0.5px solid #3b82f640",borderRadius:12,padding:16}}>
-            <div style={{fontSize:9,color:"#60a5fa",letterSpacing:"0.1em",marginBottom:12}}>NEW ORDER — {apiMode.toUpperCase()} MODE</div>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:8}}>
-              {[
-                {l:"Asset",k:"asset",type:"select",opts:ASSETS.map(a=>a.id)},
-                {l:"Direction",k:"dir",type:"select",opts:["BUY","SELL"]},
-                {l:"Size",k:"size",type:"input",ph:"0.1"},
-                {l:"Stop Loss",k:"sl",type:"input",ph:"95000"},
-                {l:"Take Profit",k:"tp",type:"input",ph:"100000"},
-                {l:"Strategy",k:"strategy",type:"select",opts:STRATEGIES.map(s=>s.name)},
-              ].map(f=>(
-                <div key={f.k}>
-                  <div style={{fontSize:8,color:"#94a3b8",marginBottom:3}}>{f.l.toUpperCase()}</div>
-                  {f.type==="select"
-                    ? <select value={newOrder[f.k]} onChange={e=>setNewOrder(o=>({...o,[f.k]:e.target.value}))}
-                        style={{width:"100%",background:"#060d17",border:"0.5px solid #1e3a5a",borderRadius:6,padding:"5px 8px",color:"#e2e8f0",fontSize:11,fontFamily:"monospace"}}>
-                        {f.opts.map(o=><option key={o} value={o}>{o}</option>)}
-                      </select>
-                    : <input placeholder={f.ph} value={newOrder[f.k]} onChange={e=>setNewOrder(o=>({...o,[f.k]:e.target.value}))}
-                        style={{width:"100%",background:"#060d17",border:"0.5px solid #1e3a5a",borderRadius:6,padding:"5px 8px",color:"#e2e8f0",fontSize:11,fontFamily:"monospace"}}/>
-                  }
-                </div>
-              ))}
-            </div>
-            <div style={{display:"flex",gap:8,marginTop:12}}>
-              <button onClick={()=>{
-                const newO={id:`ORD00${orders.length+1}`,asset:ASSETS.find(a=>a.id===newOrder.asset)?.label||newOrder.asset,
-                  dir:newOrder.dir,entry:prices[newOrder.asset]||90000,current:prices[newOrder.asset]||90000,
-                  size:parseFloat(newOrder.size)||0.1,sl:parseFloat(newOrder.sl)||0,tp:parseFloat(newOrder.tp)||0,
-                  pnl:0,pct:0,status:"open",strategy:newOrder.strategy};
-                setOrders(o=>[newO,...o]); setShowForm(false);
-              }} style={{padding:"8px 20px",background:"#22c55e",border:"none",borderRadius:7,color:"black",fontSize:11,fontWeight:800,cursor:"pointer",fontFamily:"monospace"}}>
-                ✓ PLACE ORDER
-              </button>
-              <button onClick={()=>setShowForm(false)} style={{padding:"8px 16px",background:"#1e2a3a",border:"none",borderRadius:7,color:"#94a3b8",fontSize:11,cursor:"pointer"}}>
-                Cancel
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Open positions */}
-        <div style={{background:"#0a1628",border:"0.5px solid #1e3a5a",borderRadius:12,padding:14}}>
-          <div style={{fontSize:9,color:"#94a3b8",letterSpacing:"0.1em",marginBottom:10}}>OPEN POSITIONS ({open.length})</div>
-          <table style={{width:"100%",borderCollapse:"collapse",fontSize:11,fontFamily:"monospace"}}>
-            <thead>
-              <tr>{["ID","Asset","Dir","Entry","Current","Size","P&L","P&L %","Strategy","Action"].map(h=>(
-                <th key={h} style={{textAlign:"left",padding:"5px 8px",fontSize:8,color:"#94a3b8",borderBottom:"0.5px solid #1e3a5a",letterSpacing:"0.06em"}}>{h}</th>
-              ))}</tr>
-            </thead>
-            <tbody>
-              {open.map(o=>{
-                const col=o.pnl>=0?"#22c55e":"#ef4444";
-                return <tr key={o.id} style={{borderBottom:"0.5px solid #0d1b2a"}}>
-                  <td style={{padding:"7px 8px",color:"#7c8ea8"}}>{o.id}</td>
-                  <td style={{padding:"7px 8px",color:"#e2e8f0",fontWeight:600}}>{o.asset}</td>
-                  <td style={{padding:"7px 8px"}}><span style={{color:o.dir==="LONG"?"#22c55e":"#ef4444",fontWeight:700}}>{o.dir}</span></td>
-                  <td style={{padding:"7px 8px",color:"#94a3b8"}}>{o.entry.toLocaleString()}</td>
-                  <td style={{padding:"7px 8px",color:"#e2e8f0"}}>{o.current.toLocaleString()}</td>
-                  <td style={{padding:"7px 8px",color:"#94a3b8"}}>{o.size}</td>
-                  <td style={{padding:"7px 8px",color:col,fontWeight:700}}>{o.pnl>=0?"+":""}${o.pnl}</td>
-                  <td style={{padding:"7px 8px",color:col}}>{o.pct>=0?"+":""}{o.pct}%</td>
-                  <td style={{padding:"7px 8px"}}><span style={{color:CAT_COLOR["ICT"]||"#f59e0b",fontSize:9,background:"#1e2a3a",padding:"1px 5px",borderRadius:3}}>{o.strategy}</span></td>
-                  <td style={{padding:"7px 8px"}}>
-                    <button onClick={()=>setOrders(ords=>ords.map(ord=>ord.id===o.id?{...ord,status:"closed"}:ord))}
-                      style={{fontSize:9,padding:"2px 7px",background:"#1a0000",border:"0.5px solid #ef444430",borderRadius:4,color:"#ef4444",cursor:"pointer",fontFamily:"monospace"}}>
-                      Close
-                    </button>
-                  </td>
-                </tr>;
-              })}
-            </tbody>
-          </table>
-        </div>
-
-        {/* Trade history */}
-        <div style={{background:"#0a1628",border:"0.5px solid #1e3a5a",borderRadius:12,padding:14}}>
-          <div style={{fontSize:9,color:"#94a3b8",letterSpacing:"0.1em",marginBottom:10}}>TRADE HISTORY</div>
-          <table style={{width:"100%",borderCollapse:"collapse",fontSize:11,fontFamily:"monospace"}}>
-            <thead>
-              <tr>{["ID","Asset","Dir","Entry","P&L","Result","Strategy"].map(h=>(
-                <th key={h} style={{textAlign:"left",padding:"5px 8px",fontSize:8,color:"#94a3b8",borderBottom:"0.5px solid #1e3a5a",letterSpacing:"0.06em"}}>{h}</th>
-              ))}</tr>
-            </thead>
-            <tbody>
-              {closed.map(o=>(
-                <tr key={o.id} style={{borderBottom:"0.5px solid #0d1b2a",opacity:0.7}}>
-                  <td style={{padding:"6px 8px",color:"#7c8ea8"}}>{o.id}</td>
-                  <td style={{padding:"6px 8px",color:"#94a3b8"}}>{o.asset}</td>
-                  <td style={{padding:"6px 8px",color:o.dir==="LONG"?"#22c55e":"#ef4444"}}>{o.dir}</td>
-                  <td style={{padding:"6px 8px",color:"#64748b"}}>{o.entry.toLocaleString()}</td>
-                  <td style={{padding:"6px 8px",color:o.pnl>=0?"#22c55e":"#ef4444",fontWeight:600}}>{o.pnl>=0?"+":""}${o.pnl}</td>
-                  <td style={{padding:"6px 8px"}}>
-                    <span style={{color:o.pnl>=0?"#22c55e":"#ef4444",background:o.pnl>=0?"#052e16":"#1a0000",padding:"1px 7px",borderRadius:4,fontSize:9}}>
-                      {o.pnl>=0?"WIN":"LOSS"}
-                    </span>
-                  </td>
-                  <td style={{padding:"6px 8px",color:"#94a3b8",fontSize:10}}>{o.strategy}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function PortfolioPage() {
-  const [acct, setAcct] = useState(null);
-  const [loading, setLoading] = useState(true);
-  useEffect(()=>{
-    let stop=false;
-    const load=async()=>{ const a=await fetchMT5Account(); if(!stop){ setAcct(a); setLoading(false); } };
-    load();
-    const t=setInterval(load, 15000);
-    return ()=>{ stop=true; clearInterval(t); };
-  },[]);
-
-  const L = getSignalLearning();
-  const live = !!acct;
-  const cur = acct?.currency || "USD";
-  const positions = acct?.positions || [];
-  const fmt = (v)=> v==null||!isFinite(v) ? "—" : Number(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
-  const pct = v => v==null ? "—" : `${v.toFixed(0)}%`;
-
-  const cards = [
-    {l:"Equity",      v: live?`${fmt(acct.equity)} ${cur}`:"—", c:"#e2e8f0"},
-    {l:"Balance",     v: live?`${fmt(acct.balance)} ${cur}`:"—", c:"#e2e8f0"},
-    {l:"Open P&L",    v: live?`${acct.profit>=0?"+":""}${fmt(acct.profit)} ${cur}`:"—", c:(acct?.profit||0)>=0?"#22c55e":"#ef4444"},
-    {l:"Free Margin", v: live?`${fmt(acct.free_margin)} ${cur}`:"—", c:"#60a5fa"},
-  ];
-  const stats = [
-    {l:"Signals (resolved)", v:`${L.resolved||0}/${L.total||0}`, c:"#e2e8f0"},
-    {l:"Win Rate",           v:pct(L.winRate), c:"#22c55e"},
-    {l:"Expectancy",         v:`${(L.expectancyR||0).toFixed(2)}R`, c:(L.expectancyR||0)>=0?"#22c55e":"#ef4444"},
-    {l:"Big Profit",         v:L.counts?.big_profit||0, c:"#22c55e"},
-    {l:"Big Loss",           v:L.counts?.big_loss||0, c:"#ef4444"},
-    {l:"Small Loss",         v:L.counts?.small_loss||0, c:"#f59e0b"},
-  ];
-
-  return (
-    <div style={{height:"100%",overflow:"auto"}}>
-      <div style={{maxWidth:900,margin:"0 auto",display:"flex",flexDirection:"column",gap:10}}>
-        {/* live status */}
-        {live ? (
-          <div style={{fontSize:10,color:"#22c55e",fontFamily:"monospace"}}>● Live from MT5 — account {acct.login} ({acct.server})</div>
-        ) : !loading && (
-          <div style={{background:"#1a0a00",border:"0.5px solid #f59e0b40",borderRadius:10,padding:"10px 14px",fontSize:11,color:"#f59e0b",fontFamily:"monospace"}}>
-            ⚠ MT5 bridge not reachable — no live account data. Start the bridge (and pick an MT5 mode) to see your real balance & positions.
-          </div>
-        )}
-
-        {/* account cards */}
-        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}}>
-          {cards.map(m=>(
-            <div key={m.l} style={{background:"#0a1628",border:"0.5px solid #1e3a5a",borderRadius:12,padding:"12px 16px"}}>
-              <div style={{fontSize:8,color:"#94a3b8",marginBottom:6,letterSpacing:"0.08em"}}>{m.l.toUpperCase()}</div>
-              <div style={{fontSize:20,fontWeight:800,color:m.c,fontFamily:"monospace"}}>{m.v}</div>
-            </div>
-          ))}
-        </div>
-
-        {/* open positions */}
-        <div style={{background:"#0a1628",border:"0.5px solid #1e3a5a",borderRadius:12,padding:14}}>
-          <div style={{fontSize:9,color:"#94a3b8",letterSpacing:"0.1em",marginBottom:10}}>OPEN POSITIONS — {positions.length}</div>
-          {positions.length===0 ? (
-            <div style={{fontSize:11,color:"#7c8ea8",fontFamily:"monospace"}}>{live?"No open positions.":"—"}</div>
-          ) : (
-            <table style={{width:"100%",borderCollapse:"collapse",fontSize:11,fontFamily:"monospace"}}>
-              <thead><tr>{["Symbol","Side","Vol","Open","SL","TP","P&L"].map(h=>(
-                <th key={h} style={{textAlign:"left",padding:"5px 8px",fontSize:8,color:"#94a3b8",borderBottom:"0.5px solid #1e3a5a"}}>{h}</th>
-              ))}</tr></thead>
-              <tbody>
-                {positions.map(p=>(
-                  <tr key={p.ticket} style={{borderBottom:"0.5px solid #0d1b2a"}}>
-                    <td style={{padding:"5px 8px",color:"#e2e8f0"}}>{p.symbol}</td>
-                    <td style={{padding:"5px 8px",color:p.side==="buy"?"#22c55e":"#ef4444",fontWeight:600}}>{p.side.toUpperCase()}</td>
-                    <td style={{padding:"5px 8px",color:"#cbd5e1"}}>{p.volume}</td>
-                    <td style={{padding:"5px 8px",color:"#cbd5e1"}}>{p.price_open}</td>
-                    <td style={{padding:"5px 8px",color:"#7c8ea8"}}>{p.sl||"—"}</td>
-                    <td style={{padding:"5px 8px",color:"#7c8ea8"}}>{p.tp||"—"}</td>
-                    <td style={{padding:"5px 8px",color:p.profit>=0?"#22c55e":"#ef4444",fontWeight:600}}>{p.profit>=0?"+":""}{p.profit}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
-
-        {/* performance from marked outcomes */}
-        <div style={{background:"#0a1628",border:"0.5px solid #1e3a5a",borderRadius:12,padding:14}}>
-          <div style={{fontSize:9,color:"#94a3b8",letterSpacing:"0.1em",marginBottom:10}}>SIGNAL PERFORMANCE (from your marked outcomes)</div>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:8}}>
-            {stats.map(m=>(
-              <div key={m.l} style={{background:"#060d17",border:"0.5px solid #1e3a5a",borderRadius:8,padding:"10px 12px"}}>
-                <div style={{fontSize:8,color:"#94a3b8",marginBottom:4}}>{m.l.toUpperCase()}</div>
-                <div style={{fontSize:18,fontWeight:800,color:m.c,fontFamily:"monospace"}}>{m.v}</div>
-              </div>
-            ))}
-          </div>
-          <div style={{fontSize:8,color:"#7c8ea8",marginTop:8}}>These build up as you mark signal outcomes in the History tab.</div>
+    <div style={{height:'100%',display:'flex',alignItems:'center',justifyContent:'center'}}>
+      <div style={{background:'#0a1628',border:'0.5px solid #1e3a5a',borderRadius:12,padding:'28px 36px',maxWidth:520,textAlign:'center'}}>
+        <div style={{fontSize:22,marginBottom:10}}>📝</div>
+        <div style={{fontSize:13,color:'#e2e8f0',fontWeight:700,marginBottom:8}}>Paper Trades — coming with the options revamp</div>
+        <div style={{fontSize:11,color:'#94a3b8',lineHeight:1.6}}>
+          AlphaEdge now runs decision-support + paper trading only. The new blotter will track
+          option paper positions (entry premium, SL, target, live P&L) once the Option Score
+          engine lands. Real orders stay manual in your broker app.
         </div>
       </div>
     </div>
@@ -5145,22 +4574,13 @@ function PortfolioPage() {
 }
 
 function AlertsPage({ prices={}, history=[] }) {
-  // Helper to format price with correct symbol
-  const fmtPrice = (id, p) => {
-    if (!p) return "—";
-    if (id === "NIFTY50") return `₹${Math.round(p).toLocaleString("en-IN")} pts`;
-    if (p >= 10000) return `$${(p/1000).toFixed(2)}k`;
-    return `$${p.toFixed(2)}`;
-  };
+  // Helper to format an index level
+  const fmtPrice = (id, p) => !p ? "—" : `${Math.round(p).toLocaleString("en-IN")} pts`;
 
-  const btc   = prices.BTCUSD;
-  const xau   = prices.XAUUSD;
-  const eth   = prices.ETHUSD;
   const nifty = prices.NIFTY50;
 
   // Round level helpers
   const nearestRound = (p, step) => Math.round(p/step)*step;
-  const pct = (a, b) => b ? (((a-b)/b)*100).toFixed(2) : "0.00";
 
   // Build dynamic alerts based on live prices
   const buildAlerts = () => {
@@ -5195,59 +4615,26 @@ function AlertsPage({ prices={}, history=[] }) {
       });
     });
 
-    // 2. BTC price alert vs round levels
-    if (btc) {
-      const btcRound = nearestRound(btc, 1000);
-      const btcDist  = Math.abs(btc - btcRound);
-      const btcPct   = (btcDist / btcRound * 100).toFixed(2);
+    // 2. Round-level alerts for each Indian index
+    const ROUND_STEP = { NIFTY50: 100, BANKNIFTY: 500, SENSEX: 500, FINNIFTY: 100 };
+    ASSETS.forEach((a, i) => {
+      const px = prices[a.id];
+      if (!px) return;
+      const step  = ROUND_STEP[a.id] || 100;
+      const round = nearestRound(px, step);
+      const dist  = Math.abs(px - round);
       list.push({
-        id:"btc-round",type:"price",asset:"BTC/USD",assetId:"BTCUSD",
-        severity: btcDist < btcRound*0.005 ? "high" : "medium",
-        read:false, time: IST(5*60*1000),
-        msg:`BTC/USD at ${fmtPrice("BTCUSD",btc)} — ${btcDist < btcRound*0.005 ? "testing" : "near"} round level $${btcRound.toLocaleString()} (${btcPct}% away). Watch for breakout/rejection.`,
+        id:`${a.id}-round`, type:"price", asset:a.label, assetId:a.id,
+        severity: dist < round*0.003 ? "high" : "medium",
+        read:false, time: IST((5 + i*4)*60*1000),
+        msg:`${a.label} at ${fmtPrice(a.id,px)} — ${dist < round*0.003?"testing":"near"} key level ${round.toLocaleString("en-IN")}. Watch for breakout/rejection.`,
       });
-    }
+    });
 
-    // 3. Gold (XAU) price alert
-    if (xau) {
-      const xauRound = nearestRound(xau, 100);
-      const xauDist  = Math.abs(xau - xauRound);
-      list.push({
-        id:"xau-price",type:"price",asset:"XAU/USD",assetId:"XAUUSD",
-        severity: xauDist < xauRound*0.005 ? "high" : "medium",
-        read:false, time: IST(12*60*1000),
-        msg:`Gold at ${fmtPrice("XAUUSD",xau)} — ${xauDist < xauRound*0.005?"at":"approaching"} key round $${xauRound.toLocaleString()}. Safe-haven demand ${xau>4500?"elevated":"moderate"}.`,
-      });
-    }
-
-    // 4. ETH alert
-    if (eth) {
-      const ethRound = nearestRound(eth, 100);
-      list.push({
-        id:"eth-price",type:"price",asset:"ETH/USD",assetId:"ETHUSD",
-        severity:"medium", read:true, time: IST(20*60*1000),
-        msg:`ETH/USD at ${fmtPrice("ETHUSD",eth)} — round level $${ethRound.toLocaleString()} ${eth>ethRound?"acting as support":"as resistance"}. Monitor for continuation.`,
-      });
-    }
-
-    // 5. Nifty 50 alert
-    if (nifty) {
-      const niftyRound = nearestRound(nifty, 100);
-      const niftyDist  = Math.abs(nifty - niftyRound);
-      list.push({
-        id:"nifty-price",type:"price",asset:"Nifty 50",assetId:"NIFTY50",
-        severity: niftyDist < niftyRound*0.003 ? "high" : "medium",
-        read:false, time: IST(8*60*1000),
-        msg:`Nifty 50 at ${fmtPrice("NIFTY50",nifty)} — ${niftyDist < niftyRound*0.003?"testing":"near"} key level ₹${niftyRound.toLocaleString()}. FII flows & RBI stance key drivers.`,
-      });
-    }
-
-    // 6. Geo alerts (static but relevant)
+    // 3. Macro alerts (static but relevant)
     const GEO = [
-      {id:"geo-fed",  type:"geo",asset:"ALL",   severity:"high",  read:false, time:IST(35*60*1000), msg:"Fed rate decision watch — markets pricing 87% hold. Volatility spike expected at announcement."},
-      {id:"geo-me",   type:"geo",asset:"XAU",   severity:"high",  read:true,  time:IST(55*60*1000), msg:`Middle East tensions elevated — Gold ${xau?fmtPrice("XAUUSD",xau):""} safe-haven bid active. Long Gold bias.`},
-      {id:"geo-rbi",  type:"geo",asset:"NIFTY50",severity:"medium",read:true, time:IST(90*60*1000), msg:`RBI policy stance: neutral. FII net buyers this week. ${nifty?`Nifty ${fmtPrice("NIFTY50",nifty)}`:""} range-bound.`},
-      {id:"geo-dxy",  type:"geo",asset:"BTC/USD",severity:"medium",read:true, time:IST(120*60*1000),msg:`DXY weakening — risk assets benefiting. ${btc?`BTC ${fmtPrice("BTCUSD",btc)}`:""} correlation 0.84 with DXY inverse.`},
+      {id:"geo-fed",  type:"geo",asset:"ALL",    severity:"high",  read:false, time:IST(35*60*1000), msg:"Fed rate decision watch — markets pricing 87% hold. Volatility spike expected at announcement."},
+      {id:"geo-rbi",  type:"geo",asset:"NIFTY50",severity:"medium",read:true,  time:IST(90*60*1000), msg:`RBI policy stance: neutral. FII net buyers this week. ${nifty?`Nifty ${fmtPrice("NIFTY50",nifty)}`:""} range-bound.`},
     ];
     list.push(...GEO);
 
@@ -5258,7 +4645,7 @@ function AlertsPage({ prices={}, history=[] }) {
   const [filterType, setFilterType] = useState("ALL");
 
   // Rebuild alerts whenever prices or history change
-  useEffect(()=>{ setAlerts(buildAlerts()); }, [prices.BTCUSD, prices.XAUUSD, prices.ETHUSD, prices.NIFTY50, history.length]);
+  useEffect(()=>{ setAlerts(buildAlerts()); }, [prices.NIFTY50, prices.BANKNIFTY, prices.SENSEX, prices.FINNIFTY, history.length]);
 
   const filtered = filterType==="ALL" ? alerts : alerts.filter(a=>a.type===filterType);
   const unread   = alerts.filter(a=>!a.read).length;
@@ -5507,7 +4894,7 @@ function RiskCalcPage() {
   const [sl,        setSl]        = useState(95500);
   const [tp1,       setTp1]       = useState(99500);
   const [tp2,       setTp2]       = useState(101000);
-  const [asset,     setAsset]     = useState("BTCUSD");
+  const [asset,     setAsset]     = useState("NIFTY50");
   const [leverage,  setLeverage]  = useState(1);
   const [dir,       setDir]       = useState("LONG");
   const [scenarios, setScenarios] = useState([]);
@@ -5515,33 +4902,7 @@ function RiskCalcPage() {
   // Money management rules (applied to every live order)
   const [mm,      setMm]      = useState(()=>getMoneyMgt());
   const [mmSaved, setMmSaved] = useState(false);
-  const [mt5CapitalMsg, setMt5CapitalMsg] = useState("");
   const saveMm = (next)=>{ setMm(next); setMoneyMgt(next); setMmSaved(true); setTimeout(()=>setMmSaved(false),2500); };
-
-  useEffect(()=>{
-    let stop = false;
-    if (mm.fetchCapitalFromMT5 === false) {
-      setMt5CapitalMsg("");
-      return () => { stop = true; };
-    }
-    setMt5CapitalMsg("Checking MT5 balance...");
-    fetchMT5Account().then(acct=>{
-      if (stop) return;
-      const balance = Number(acct?.balance);
-      if (Number.isFinite(balance) && balance > 0) {
-        setMm(prev=>{
-          if (prev.fetchCapitalFromMT5 === false) return prev;
-          const next = { ...prev, capital: balance };
-          setMoneyMgt(next);
-          return next;
-        });
-        setMt5CapitalMsg(`Using MT5 balance ${balance.toFixed(2)} ${acct?.currency || "USD"}`);
-      } else {
-        setMt5CapitalMsg("MT5 balance not available");
-      }
-    });
-    return () => { stop = true; };
-  }, [mm.fetchCapitalFromMT5]);
 
   const riskAmt   = acctSize * riskPct / 100;
   const slPips    = Math.abs(entry - sl);
@@ -5595,36 +4956,15 @@ function RiskCalcPage() {
         {/* Money management rules */}
         <div style={{background:"#0a1628",border:"0.5px solid #3b82f640",borderRadius:12,padding:14}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
-            <div style={{fontSize:9,color:"#94a3b8",letterSpacing:"0.1em"}}>MONEY MANAGEMENT — APPLIED TO EVERY LIVE ORDER</div>
+            <div style={{fontSize:9,color:"#94a3b8",letterSpacing:"0.1em"}}>MONEY MANAGEMENT — APPLIED TO EVERY PAPER TRADE</div>
             {mmSaved&&<span style={{fontSize:10,color:"#22c55e",fontFamily:"monospace"}}>✓ Saved</span>}
           </div>
           <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:12}}>
             <div>
-              <div style={{display:"flex",justifyContent:"space-between",gap:8,alignItems:"center",marginBottom:3}}>
-                <div style={{fontSize:8,color:"#94a3b8",letterSpacing:"0.06em"}}>CAPITAL ($)</div>
-                {mt5CapitalMsg&&<div style={{fontSize:8,color:"#22c55e",textAlign:"right"}}>{mt5CapitalMsg}</div>}
-              </div>
+              <div style={{fontSize:8,color:"#94a3b8",letterSpacing:"0.06em",marginBottom:3}}>CAPITAL (₹)</div>
               <input type="number" value={mm.capital} step={100} min={0}
                 onChange={e=>saveMm({...mm,capital:parseFloat(e.target.value)||0})}
                 style={{width:"100%",background:"#060d17",border:"0.5px solid #1e3a5a",borderRadius:6,padding:"7px 10px",color:"#e2e8f0",fontSize:12,fontFamily:"monospace"}}/>
-            </div>
-            <div>
-              <div style={{fontSize:8,color:"#94a3b8",marginBottom:3,letterSpacing:"0.06em"}}>LOT SIZE</div>
-              <input type="number" value={mm.lotSize} step={0.01} min={0.01}
-                onChange={e=>saveMm({...mm,lotSize:parseFloat(e.target.value)||0.01})}
-                style={{width:"100%",background:"#060d17",border:"0.5px solid #1e3a5a",borderRadius:6,padding:"7px 10px",color:"#e2e8f0",fontSize:12,fontFamily:"monospace"}}/>
-            </div>
-          </div>
-
-          <div style={{marginTop:10,display:"flex",alignItems:"center",gap:10}}>
-            <div onClick={()=>saveMm({...mm,fetchCapitalFromMT5:mm.fetchCapitalFromMT5===false})}
-              style={{width:38,height:20,borderRadius:10,background:mm.fetchCapitalFromMT5!==false?"#22c55e":"#1e2a3a",
-                border:`0.5px solid ${mm.fetchCapitalFromMT5!==false?"#22c55e":"#1e3a5a"}`,position:"relative",cursor:"pointer",flexShrink:0}}>
-              <div style={{width:14,height:14,borderRadius:"50%",background:mm.fetchCapitalFromMT5!==false?"white":"#94a3b8",position:"absolute",top:3,left:mm.fetchCapitalFromMT5!==false?21:3,transition:"left 0.2s"}}/>
-            </div>
-            <div>
-              <div style={{fontSize:12,color:"#e2e8f0"}}>Use MT5 balance as capital</div>
-              <div style={{fontSize:9,color:"#7c8ea8"}}>When the bridge is running, this refreshes capital from the terminal balance.</div>
             </div>
           </div>
 
@@ -5677,67 +5017,8 @@ function RiskCalcPage() {
             )}
           </div>
 
-          {/* Step trailing SL */}
-          <div style={{marginTop:14,display:"flex",alignItems:"center",gap:10}}>
-            <div onClick={()=>saveMm({...mm,stepTrailEnabled:!mm.stepTrailEnabled,trailAfter1R:!mm.stepTrailEnabled})}
-              style={{width:38,height:20,borderRadius:10,background:mm.stepTrailEnabled!==false?"#22c55e":"#1e2a3a",
-                border:`0.5px solid ${mm.stepTrailEnabled!==false?"#22c55e":"#1e3a5a"}`,position:"relative",cursor:"pointer",flexShrink:0}}>
-              <div style={{width:14,height:14,borderRadius:"50%",background:mm.stepTrailEnabled!==false?"white":"#94a3b8",position:"absolute",top:3,left:mm.stepTrailEnabled!==false?21:3,transition:"left 0.2s"}}/>
-            </div>
-            <div>
-              <div style={{fontSize:12,color:"#e2e8f0"}}>Step trailing stop</div>
-              <div style={{fontSize:9,color:"#7c8ea8"}}>Move SL to breakeven at 1:1, then trail in fixed point steps. The bridge never moves SL backward.</div>
-            </div>
-          </div>
-
-          {mm.stepTrailEnabled!==false&&(
-            <div style={{marginTop:10,display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}}>
-              <div>
-                <div style={{fontSize:8,color:"#94a3b8",marginBottom:3,letterSpacing:"0.06em"}}>BE AT</div>
-                <select value={mm.beTriggerR || 1} onChange={e=>saveMm({...mm,beTriggerR:parseFloat(e.target.value)||1})}
-                  style={{width:"100%",background:"#060d17",border:"0.5px solid #1e3a5a",borderRadius:6,padding:"7px 8px",color:"#e2e8f0",fontSize:12,fontFamily:"monospace"}}>
-                  <option value={1}>1:1</option>
-                </select>
-              </div>
-              <div>
-                <div style={{fontSize:8,color:"#94a3b8",marginBottom:3,letterSpacing:"0.06em"}}>START TSL</div>
-                <select value={mm.trailStartR || 1} onChange={e=>saveMm({...mm,trailStartR:parseFloat(e.target.value)||1})}
-                  style={{width:"100%",background:"#060d17",border:"0.5px solid #1e3a5a",borderRadius:6,padding:"7px 8px",color:"#e2e8f0",fontSize:12,fontFamily:"monospace"}}>
-                  <option value={1}>After 1:1</option>
-                  <option value={1.5}>After 1:1.5</option>
-                </select>
-              </div>
-              <div>
-                <div style={{fontSize:8,color:"#94a3b8",marginBottom:3,letterSpacing:"0.06em"}}>STEP</div>
-                <input type="number" value={mm.trailStepPoints ?? 500} step={50} min={1}
-                  onChange={e=>saveMm({...mm,trailStepPoints:parseFloat(e.target.value)||500})}
-                  style={{width:"100%",background:"#060d17",border:"0.5px solid #1e3a5a",borderRadius:6,padding:"7px 10px",color:"#e2e8f0",fontSize:12,fontFamily:"monospace"}}/>
-              </div>
-              <div>
-                <div style={{fontSize:8,color:"#94a3b8",marginBottom:3,letterSpacing:"0.06em"}}>TRAIL DISTANCE</div>
-                <input type="number" value={mm.trailDistancePoints ?? 500} step={50} min={1}
-                  onChange={e=>saveMm({...mm,trailDistancePoints:parseFloat(e.target.value)||500})}
-                  style={{width:"100%",background:"#060d17",border:"0.5px solid #1e3a5a",borderRadius:6,padding:"7px 10px",color:"#e2e8f0",fontSize:12,fontFamily:"monospace"}}/>
-              </div>
-              <div style={{gridColumn:"1 / -1",fontSize:9,color:"#7c8ea8",lineHeight:1.5}}>
-                On your gold symbol, 500 points is about a $5 price move when 100 points equals $1.
-              </div>
-            </div>
-          )}
-
-          <div style={{marginTop:12,display:"flex",alignItems:"center",gap:10}}>
-            <div onClick={()=>saveMm({...mm,closeOppositeFirst:mm.closeOppositeFirst===false})}
-              style={{width:38,height:20,borderRadius:10,background:mm.closeOppositeFirst!==false?"#3b82f6":"#1e2a3a",
-                border:`0.5px solid ${mm.closeOppositeFirst!==false?"#60a5fa":"#1e3a5a"}`,position:"relative",cursor:"pointer",flexShrink:0}}>
-              <div style={{width:14,height:14,borderRadius:"50%",background:mm.closeOppositeFirst!==false?"white":"#94a3b8",position:"absolute",top:3,left:mm.closeOppositeFirst!==false?21:3,transition:"left 0.2s"}}/>
-            </div>
-            <div>
-              <div style={{fontSize:12,color:"#e2e8f0"}}>Close opposite AlphaEdge trade first</div>
-              <div style={{fontSize:9,color:"#7c8ea8"}}>If a buy triggers, the bridge closes running AlphaEdge sell positions on that symbol before opening the buy, and vice versa.</div>
-            </div>
-          </div>
           <div style={{fontSize:8,color:"#7c8ea8",marginTop:12,lineHeight:1.5}}>
-            These rules are sent with every order: fixed lot size, optional fixed SL, take-profit from the chosen R:R, step trailing, and opposite-side protection managed by the MT5 bridge.
+            These rules size every option paper-trade plan: capital, optional fixed SL on the premium, and the take-profit R:R multiple.
           </div>
         </div>
 
@@ -5937,12 +5218,10 @@ const ECON_EVENTS_FALLBACK = [
   {id:18,datetime:"2026-05-22T04:00",title:"India GDP Growth Rate",   currency:"INR",impact:"high",  forecast:"7.2%",  previous:"8.4%",  actual:null},
 ];
 
+// US events still move Indian indices (Fed → FII flows), so USD maps to them too.
 const ASSET_IMPACT={
-  USD:["BTCUSD","XAUUSD"],
-  EUR:["XAUUSD"],
-  GBP:["XAUUSD"],
-  CNY:["BTCUSD","XAUUSD"],
-  INR:["NIFTY50"],
+  USD:["NIFTY50","BANKNIFTY","SENSEX"],
+  INR:["NIFTY50","BANKNIFTY","SENSEX","FINNIFTY"],
 };
 
 // Live economic-calendar cache, populated by fetchEconEvents(). Module scope so
@@ -6167,15 +5446,9 @@ function persistSettings(data) {
   try {
     const existing = loadSettings() || {};
     const merged = { ...existing, ...data };
-    // Deep-merge broker so fields set elsewhere — execMode (the live/demo/paper
-    // master switch from the Execution page) and the mt5 sub-configs — are NOT
-    // wiped when the Settings page saves its partial broker state. Without this,
-    // saving Settings reset the app to Paper on the next restart.
-    merged.broker = {
-      ...(existing.broker || {}),
-      ...(data.broker || {}),
-      mt5: { ...((existing.broker || {}).mt5 || {}), ...((data.broker || {}).mt5 || {}) },
-    };
+    // Deep-merge broker so fields set elsewhere are not wiped when the Settings
+    // page saves its partial broker state.
+    merged.broker = { ...(existing.broker || {}), ...(data.broker || {}) };
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(merged));
   } catch {}
 }
@@ -6188,9 +5461,6 @@ function SettingsPage() {
     deepseek:     getDeepSeekKey(),
     dhan:         getDhanToken(),
     dhanClientId: getDhanClientId(),
-    binance:      saved0.apiKeys?.binance      || "",
-    alpaca:       saved0.apiKeys?.alpaca       || "",
-    oanda:        saved0.apiKeys?.oanda        || "",
     alphavantage: saved0.apiKeys?.alphavantage || "",
   });
   const [aiProvider, setAIProviderState] = useState(
@@ -6234,28 +5504,13 @@ function SettingsPage() {
     pnlAlert:    saved0.notif?.pnlAlert    ?? true,
   });
 
-  const mkMt5 = (a={}) => ({
-    login:     a.login     || "",
-    password:  a.password  || "",
-    server:    a.server    || "",
-    bridgeUrl: a.bridgeUrl || "",
-  });
-  const _oldMt5 = saved0.broker?.mt5 || {};
+  // Local data-bridge URL (migrates from the old MT5 demo/live slots if set).
   const [broker, setBroker] = useState({
-    // Reflect the real execution mode (set on the Execution page) so this
-    // toggle isn't misleadingly stuck on "Paper" after a restart.
-    mode:     getExecMode() !== "paper" ? "live" : (saved0.broker?.mode || "paper"),
-    exchange: saved0.broker?.exchange || "binance",
-    mt5: {
-      // Migrate any previously-saved single MT5 config into the Demo slot
-      demo: mkMt5(_oldMt5.demo || (_oldMt5.login !== undefined ? _oldMt5 : {})),
-      live: mkMt5(_oldMt5.live),
-    },
+    bridgeUrl: saved0.broker?.bridgeUrl
+      || saved0.broker?.mt5?.demo?.bridgeUrl
+      || saved0.broker?.mt5?.live?.bridgeUrl
+      || "",
   });
-  const [mt5Tab, setMt5Tab] = useState("demo");
-  const setMt5 = (field,value)=>setBroker(b=>({
-    ...b, mt5:{ ...b.mt5, [mt5Tab]:{ ...b.mt5[mt5Tab], [field]:value } }
-  }));
 
   const [historyDays, setHistoryDays] = useState(saved0.historyDays || "30");
   const [autoSave,    setAutoSave]    = useState(saved0.autoSave    ?? true);
@@ -6702,131 +5957,27 @@ function SettingsPage() {
           </>
         )}
 
-        {/* ── Broker mode ── */}
-        {section("BROKER & EXECUTION MODE",
+        {/* ── Local data bridge ── */}
+        {section("LOCAL DATA BRIDGE",
           <>
-            {row("Trading Mode","Paper = simulated, Live = real funds. (Finer control — Demo/Live — on the Execution page.)",
-              <div style={{display:"flex",gap:4}}>
-                {["paper","live"].map(m=>(
-                  <span key={m} onClick={()=>{
-                    setBroker(b=>({...b,mode:m}));
-                    // Drive the master execMode immediately so the choice takes
-                    // effect and persists across restarts without needing Save.
-                    setExecMode(m === "live" ? "mt5_live" : "paper");
-                  }}
-                    style={{padding:"5px 14px",borderRadius:6,fontSize:11,cursor:"pointer",fontFamily:"monospace",fontWeight:700,
-                      background:broker.mode===m?(m==="live"?"#1a0000":"#052e16"):"#060d17",
-                      color:broker.mode===m?(m==="live"?"#ef4444":"#22c55e"):"#94a3b8",
-                      border:`0.5px solid ${broker.mode===m?(m==="live"?"#ef444440":"#22c55e40"):"#1e3a5a"}`}}>
-                    {m==="live"?"⚡ LIVE":"◎ PAPER"}
-                  </span>
-                ))}
-              </div>
-            )}
-            {broker.mode==="live"&&(
-              <div style={{background:"#1a0000",border:"0.5px solid #ef444430",borderRadius:8,padding:"8px 12px",marginBottom:12}}>
-                <div style={{fontSize:10,color:"#ef4444",fontWeight:700}}>⚠ LIVE TRADING ENABLED — Real funds at risk</div>
-                <div style={{fontSize:9,color:"#94a3b8",marginTop:2}}>All orders will be sent to your connected broker. Ensure API keys are set and risk parameters are correct.</div>
-              </div>
-            )}
-            {row("Default Exchange","Exchange used for crypto execution",
-              <select value={broker.exchange} onChange={e=>setBroker(b=>({...b,exchange:e.target.value}))}
-                style={{background:"#060d17",border:"0.5px solid #1e3a5a",borderRadius:6,padding:"5px 8px",color:"#e2e8f0",fontSize:11,fontFamily:"monospace"}}>
-                <option value="binance">Binance</option>
-                <option value="coinbase">Coinbase</option>
-                <option value="bybit">ByBit</option>
-                <option value="alpaca">Alpaca (US Stocks)</option>
-                <option value="oanda">OANDA (Forex/Gold)</option>
-                <option value="mt5">MetaTrader 5 (MT5)</option>
-              </select>
-            )}
-          </>
-        )}
-
-        {/* MetaTrader 5 (MT5) terminal — Demo / Live tabs */}
-        {section("METATRADER 5 (MT5) TERMINAL",
-          <>
-            {/* Account type tabs */}
-            <div style={{display:"flex",gap:6,marginBottom:14}}>
-              {[
-                {id:"demo",label:"◎ Demo Account",        c:"#22c55e"},
-                {id:"live",label:"⚡ Live (Real Account)", c:"#ef4444"},
-              ].map(t=>{
-                const cfg=broker.mt5[t.id];
-                const ready=cfg.login&&cfg.server;
-                const active=mt5Tab===t.id;
-                return (
-                  <span key={t.id} onClick={()=>setMt5Tab(t.id)}
-                    style={{flex:1,textAlign:"center",padding:"8px 14px",borderRadius:7,fontSize:11,fontWeight:700,
-                      cursor:"pointer",fontFamily:"monospace",transition:"all 0.15s",
-                      background:active?t.c+"18":"#060d17",
-                      color:active?t.c:"#94a3b8",
-                      border:`0.5px solid ${active?t.c+"66":"#1e3a5a"}`}}>
-                    {t.label}{ready?" ✓":""}
-                  </span>
-                );
-              })}
-            </div>
-
-            {/* Live account warning */}
-            {mt5Tab==="live"&&(
-              <div style={{background:"#1a0000",border:"0.5px solid #ef444430",borderRadius:8,padding:"8px 12px",marginBottom:12}}>
-                <div style={{fontSize:10,color:"#ef4444",fontWeight:700}}>⚠ REAL ACCOUNT — Real funds at risk</div>
-                <div style={{fontSize:9,color:"#94a3b8",marginTop:2}}>Orders sent through a connected bridge use real money. Double-check the credentials and your risk settings.</div>
-              </div>
-            )}
-
             <div style={{background:"#0a1e35",border:"0.5px solid #60a5fa30",borderRadius:8,padding:"10px 14px",marginBottom:12}}>
-              <div style={{fontSize:10,color:"#60a5fa",marginBottom:4,fontWeight:600}}>
-                {mt5Tab==="demo"?"Connect your MT5 Demo account":"Connect your MT5 Live (real) account"}
-              </div>
               <div style={{fontSize:10,color:"#94a3b8",lineHeight:1.7}}>
-                Enter the login details from your broker&apos;s MT5 {mt5Tab==="demo"?"demo":"live"} account. A browser cannot
-                talk to the MT5 terminal directly, so order execution also needs a bridge — a hosted API such as
-                <span style={{color:"#60a5fa"}}> MetaApi</span>, or a small local bridge next to your MT5 terminal.
-                Without a bridge, details are stored for reference only.
+                The browser can&apos;t call api.dhan.co directly (CORS), so quotes, candles and the
+                option chain route through the local Python bridge (<span style={{color:"#60a5fa"}}>bridge.py</span>,
+                default <span style={{color:"#60a5fa"}}>http://127.0.0.1:5000</span>). AlphaEdge never places
+                broker orders — the bridge is a data service only.
               </div>
             </div>
-
-            {row("Account Login","Your MT5 account number",
-              textInput(broker.mt5[mt5Tab].login, v=>setMt5("login",v),
-                mt5Tab==="demo"?"e.g. 51234567 (demo)":"e.g. 71234567 (real)"))}
-            {row("Password","Trading or investor password",
-              pwInput("••••••••", broker.mt5[mt5Tab].password, v=>setMt5("password",v)))}
-            {row("Server","Broker server name (exactly as shown in MT5)",
-              textInput(broker.mt5[mt5Tab].server, v=>setMt5("server",v),
-                mt5Tab==="demo"?"e.g. ICMarkets-Demo02":"e.g. ICMarkets-Live03"))}
-            {row("Bridge / API URL","Optional — endpoint that relays orders to MT5",
-              textInput(broker.mt5[mt5Tab].bridgeUrl, v=>setMt5("bridgeUrl",v), "https://...  (MetaApi or local bridge)"))}
-
-            <div style={{display:"flex",alignItems:"center",gap:8,marginTop:4}}>
-              <span style={{fontSize:10,
-                color:(broker.mt5[mt5Tab].login&&broker.mt5[mt5Tab].server)?"#22c55e":"#f59e0b"}}>
-                {(broker.mt5[mt5Tab].login&&broker.mt5[mt5Tab].server)
-                  ? `✓ ${mt5Tab==="demo"?"Demo":"Live"} account ready — set "Default Exchange" to MetaTrader 5 and Save.`
-                  : `⚠ Enter at least Login and Server for the ${mt5Tab==="demo"?"Demo":"Live"} account, then Save.`}
-              </span>
-            </div>
-            <div style={{fontSize:9,color:"#7c8ea8",marginTop:8,lineHeight:1.6}}>
-              🔒 Passwords are stored only in this browser. Paper mode uses your <b>Demo</b> account; Live mode uses your
-              <b> Live</b> account. Prefer an <b>investor (read-only)</b> password unless a trusted bridge is set up.
-            </div>
+            {row("Bridge URL","Leave empty to use the default local bridge on :5000",
+              textInput(broker.bridgeUrl, v=>setBroker(b=>({...b,bridgeUrl:v})), "http://127.0.0.1:5000"))}
           </>
         )}
 
         {/* API Keys */}
         {section("API KEYS",
           <>
-            {[
-              {label:"Binance API Key",hint:"For BTC/ETH execution",key:"binance"},
-              {label:"Alpaca API Key",hint:"For US indices and stocks",key:"alpaca"},
-              {label:"OANDA API Key",hint:"For XAU/USD and Forex",key:"oanda"},
-              {label:"Alpha Vantage Key",hint:"News and sentiment data",key:"alphavantage"},
-            ].map(f=>(
-              <div key={f.key}>
-                {row(f.label,f.hint,pwInput("sk-xxxx...",apiKeys[f.key],v=>setApiKeys(k=>({...k,[f.key]:v}))))}
-              </div>
-            ))}
+            {row("Alpha Vantage Key","News and sentiment data (optional)",
+              pwInput("sk-xxxx...",apiKeys.alphavantage,v=>setApiKeys(k=>({...k,alphavantage:v}))))}
             <div style={{fontSize:9,color:"#7c8ea8",marginTop:4,lineHeight:1.6}}>
               🔒 API keys are stored locally in your browser — never sent to external servers. Use read-only keys where possible.
             </div>
@@ -7056,47 +6207,16 @@ function SettingsPage() {
   );
 }
 
-// Reconcile signal outcomes from real MT5 trades (fills, realized P&L, close
-// times). Module-level and polled from the ROOT App: this used to run only
-// while the History page was mounted, so outcomes sat stale ("pending" with
-// old floating P&L) app-wide — quietly weakening the cooldown/loss-streak
-// guardrails and the broker-realized export until someone opened History.
-async function reconcileHistoryFromMT5(days = 45) {
-  const trades = await fetchMT5History(days);
-  if (!trades.length) return { trades, changed: false, next: null };
-  const cur = await loadHistory();
-  let changed = false;
-  const next = cur.map(s => {
-    const t = matchTradeToSignal(s, trades);
-    if (!t) return s;
-    const patch = { mt5Ticket: s.mt5Ticket || t.ticket, realizedUsd: t.profit, mt5State: t.state };
-    if (t.state === "closed") {
-      patch.outcome = t.profit >= 0 ? "win" : "loss";
-      if (t.close_time) patch.closedAt = t.close_time * 1000;   // for cooldown guardrail
-    }
-    const same = s.outcome===patch.outcome && s.realizedUsd===patch.realizedUsd && s.mt5State===patch.mt5State && String(s.mt5Ticket)===String(patch.mt5Ticket) && s.closedAt===patch.closedAt;
-    if (!same) changed = true;
-    return { ...s, ...patch };
-  });
-  if (changed) await saveHistory(next);
-  return { trades, changed, next };
-}
-
-// ─── PRICE-BASED AUTO-RESOLVER (non-MT5 signals: NSE indices) ─────────────────
-// Nifty/NSE signals never reach MT5 (Vantage carries no NSE instruments and the
-// Dhan subscription is data-only), so their outcomes sat "pending" forever
-// unless hand-marked — the June 2026 monthly export had all 10 Nifty signals
-// PENDING. This resolves them from the live quote instead:
+// ─── PRICE-BASED AUTO-RESOLVER ────────────────────────────────────────────────
+// Resolves pending index signals from the live quote:
 //   BULLISH: price <= SL -> loss · price >= TP1 -> win
 //   BEARISH: price >= SL -> loss · price <= TP1 -> win
 // SL is checked FIRST, so an ambiguous snapshot resolves AGAINST the trade
 // (conservative). Snapshot-based by nature: a spike that touched SL/TP between
 // 60s polls is invisible, so outcomes are approximate — every auto resolution
 // is stamped resolvedBy/resolvedAt/resolvedPrice for auditability, and a manual
-// updateOutcome can still override. Signals carrying an MT5 ticket/state are
-// never touched (the terminal is their source of truth). Deliberately does NOT
-// set closedAt: the post-loss cooldown guardrail keys on closedAt, and a paper
-// Nifty SL must not block real MT5 entries (manual marks behave the same way).
+// updateOutcome can still override. (Will be superseded by premium-based
+// resolution for option paper trades in the revamp's Phase 7.)
 // Pending signals that never reach either level expire after their horizon so
 // they stop clogging the stats ("expired" is excluded from win-rate/learning).
 const AUTO_RESOLVE_TTL_MS = {
@@ -7106,13 +6226,12 @@ const AUTO_RESOLVE_TTL_MS = {
 };
 
 async function autoResolveFromPrice() {
-  const prices = await fetchMT5Prices(); // bridge /price — includes Dhan NSE quotes
+  const prices = await fetchBridgePrices(); // bridge /price — Dhan index quotes
   const cur = await loadHistory();
   const now = Date.now();
   let changed = false;
   const next = cur.map(s => {
     if ((s.outcome || "pending") !== "pending") return s;
-    if (s.mt5Ticket || s.mt5State) return s; // MT5 owns these outcomes
 
     // Expiry takes PRECEDENCE over price: a signal past its horizon must not
     // be scored against today's quote — price has wandered for days and a
@@ -7165,7 +6284,6 @@ function HistoryPage({ history, setHistory }) {
   const [filterBias, setFilterBias]       = useState("ALL");
   const [expanded, setExpanded]           = useState(null);
   const [loading, setLoading]             = useState(false);
-  const [mt5Trades, setMt5Trades]         = useState([]);
   const [lastSync, setLastSync]           = useState(null);
   const [tgFlash, setTgFlash]             = useState({});
   const [exportMsg, setExportMsg]         = useState(null);   // Obsidian export feedback
@@ -7174,23 +6292,24 @@ function HistoryPage({ history, setHistory }) {
   const outcomeLabel = { small_loss:"SL", small_profit:"WIN", big_profit:"BIG WIN", big_loss:"BIG LOSS", win:"WIN", loss:"LOSS", missed:"MISSED", pending:"PENDING" };
   const biasColor    = { BULLISH:"#22c55e", BEARISH:"#ef4444", NEUTRAL:"#f59e0b" };
 
-  // ── Pull AlphaEdge's real MT5 trades and reconcile signal outcomes from them ──
-  // (Shares reconcileHistoryFromMT5 with the root-App poller; this page just
-  // refreshes more often and keeps the trades list for display.)
-  const syncFromMT5 = useCallback(async () => {
-    const { trades, changed, next } = await reconcileHistoryFromMT5(45);
-    setMt5Trades(trades);
-    if (changed && next) setHistory(next);
+  // ── Refresh outcomes from the price-based auto-resolver ─────────────────────
+  // (Shares autoResolveFromPrice with the root-App poller; this page just
+  // refreshes more often while it's open.)
+  const refreshOutcomes = useCallback(async () => {
+    try {
+      const { changed, next } = await autoResolveFromPrice();
+      if (changed && next) setHistory(next);
+    } catch { /* bridge offline — retry next tick */ }
     setLastSync(Date.now());
   }, [setHistory]);
 
-  // On mount: load history, then sync from MT5; refresh trades every 20s.
+  // On mount: load history, then resolve; refresh every 20s while open.
   useEffect(() => {
     setLoading(true);
-    loadHistory().then(h => { setHistory(h); setLoading(false); syncFromMT5(); });
-    const iv = setInterval(syncFromMT5, 20000);
+    loadHistory().then(h => { setHistory(h); setLoading(false); refreshOutcomes(); });
+    const iv = setInterval(refreshOutcomes, 20000);
     return () => clearInterval(iv);
-  }, [syncFromMT5, setHistory]);
+  }, [refreshOutcomes, setHistory]);
 
   const setManualOutcome = async (id, outcome) => { setHistory(await updateOutcome(id, outcome)); };
 
@@ -7214,15 +6333,8 @@ function HistoryPage({ history, setHistory }) {
     setTimeout(() => setExportMsg(null), 7000);
   };
 
-  // ── Trade matching + effective status (MT5 first, manual fallback) ──────────
-  const tradeFor = (sig) => matchTradeToSignal(sig, mt5Trades);
-  const statusOf = (sig, t) => {
-    if (t) {
-      if (t.state === "open") return { key:"open", label:"OPEN", color:"#f59e0b", live:true };
-      return t.profit >= 0
-        ? { key:"win",  label:"WIN",  color:"#22c55e" }
-        : { key:"loss", label:"LOSS", color:"#ef4444" };
-    }
+  // ── Effective status from the signal's own (auto/manual) outcome ────────────
+  const statusOf = (sig) => {
     const b = outcomeBucket(sig);
     if (b === "pending") return { key:"pending", label: sig.tradeType==="Paper" ? "PAPER" : "PENDING", color:"#94a3b8" };
     return { key:b, label: outcomeLabel[b]||b.toUpperCase(), color: outcomeColor[b]||"#94a3b8" };
@@ -7234,7 +6346,7 @@ function HistoryPage({ history, setHistory }) {
     if (filterBias    !== "ALL" && s.bias    !== filterBias)  return false;
     if (filterNature  !== "ALL" && s.nature  !== filterNature) return false;
     if (filterOutcome !== "ALL") {
-      const st = statusOf(s, tradeFor(s));
+      const st = statusOf(s);
       if (st.key !== filterOutcome) return false;
     }
     return true;
@@ -7244,12 +6356,9 @@ function HistoryPage({ history, setHistory }) {
   const resolved = history.filter(isResolvedSignal);
   const wins   = resolved.filter(isWinSignal).length;
   const losses = resolved.filter(isLossSignal).length;
-  const openCt = history.filter(s => { const t=tradeFor(s); return t && t.state==="open"; }).length;
-  const pending = history.filter(s => outcomeBucket(s)==="pending" && !(tradeFor(s))).length;
+  const pending = history.filter(s => outcomeBucket(s)==="pending").length;
   const winRate = resolved.length ? ((wins/resolved.length)*100).toFixed(1) : "—";
   const netR = resolved.reduce((a,s)=>a+signalPnlR(s),0);
-  const netUsd = history.reduce((a,s)=>{ const t=tradeFor(s); return a + (t && Number.isFinite(t.profit) ? t.profit : 0); }, 0);
-  const hasUsd = mt5Trades.length > 0;
 
   // ── Performance aggregation — profitable strategy / timeframe / RR ──────────
   const perfBy = (keyFn) => {
@@ -7262,7 +6371,6 @@ function HistoryPage({ history, setHistory }) {
       if (isWinSignal(s))  g.wins += 1;
       if (isLossSignal(s)) g.losses += 1;
       g.netR += signalPnlR(s);
-      const t = tradeFor(s); if (t && Number.isFinite(t.profit)) g.netUsd += t.profit;
       const rr = Number(s.riskReward||0); if (rr>0){ g.sumRR += rr; g.rrN += 1; }
     });
     return Object.values(groups).map(g => ({ ...g,
@@ -7283,7 +6391,6 @@ function HistoryPage({ history, setHistory }) {
   // ── Formatters ──────────────────────────────────────────────────────────────
   const fmtDay  = ts => new Date(ts).toLocaleDateString("en-IN",{day:"2-digit",month:"short",timeZone:"Asia/Kolkata"});
   const fmtTime = ts => new Date(ts).toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit",hour12:false,timeZone:"Asia/Kolkata"});
-  const fmtDate = ts => `${fmtDay(ts)} ${fmtTime(ts)} IST`;
   const fmtPx   = v => Number.isFinite(Number(v)) ? Number(v).toLocaleString("en-IN",{maximumFractionDigits:2}) : "—";
   const styleMeta = n => n==="Scalping" ? {c:"#f43f5e",i:"⚡"} : n==="Swing" ? {c:"#60a5fa",i:"📈"} : {c:"#f59e0b",i:"🕐"};
   const wrColor = w => w>=60?"#22c55e":w>=45?"#f59e0b":"#ef4444";
@@ -7298,7 +6405,7 @@ function HistoryPage({ history, setHistory }) {
     setTimeout(()=>setTgFlash(f=>{const n={...f};delete n[sig.id];return n;}),4000);
   };
 
-  const head = ["Date / Time","Symbol","Signal","Strategy","Style","Entry","SL","TP","RR","Status","Result ($)"];
+  const head = ["Date / Time","Symbol","Signal","Strategy","Style","Entry","SL","TP","RR","Status"];
   const th = (t,extra={}) => <th key={t} style={{padding:"8px 9px",textAlign:"left",fontSize:8,color:"#94a3b8",letterSpacing:"0.07em",borderBottom:"0.5px solid #1e3a5a",whiteSpace:"nowrap",...extra}}>{t.toUpperCase()}</th>;
 
   return (
@@ -7312,10 +6419,9 @@ function HistoryPage({ history, setHistory }) {
             {l:"Total",   v:history.length,                          c:"#e2e8f0"},
             {l:"Wins",    v:wins,                                     c:"#22c55e"},
             {l:"Losses",  v:losses,                                   c:"#ef4444"},
-            {l:"Open",    v:openCt,                                   c:"#f59e0b"},
+            {l:"Pending", v:pending,                                  c:"#f59e0b"},
             {l:"Win Rate",v:resolved.length?`${winRate}%`:"—",        c:resolved.length?wrColor(parseFloat(winRate)):"#94a3b8"},
             {l:"Net R",   v:`${netR>=0?"+":""}${netR.toFixed(1)}R`,   c:netR>=0?"#22c55e":"#ef4444"},
-            {l:"MT5 P&L", v:hasUsd?`${netUsd>=0?"+":""}$${netUsd.toFixed(2)}`:"—", c:hasUsd?(netUsd>=0?"#22c55e":"#ef4444"):"#94a3b8"},
           ].map(m=>(
             <div key={m.l} style={{textAlign:"center",minWidth:56}}>
               <div style={{fontSize:8,color:"#7c8ea8",letterSpacing:"0.06em"}}>{m.l.toUpperCase()}</div>
@@ -7323,9 +6429,9 @@ function HistoryPage({ history, setHistory }) {
             </div>
           ))}
           <div style={{marginLeft:"auto",display:"flex",gap:6,alignItems:"center"}}>
-            <button onClick={async()=>{ setLoading(true); const h=await loadHistory(); setHistory(h); await syncFromMT5(); setLoading(false); }}
+            <button onClick={async()=>{ setLoading(true); const h=await loadHistory(); setHistory(h); await refreshOutcomes(); setLoading(false); }}
               style={{fontSize:10,padding:"5px 12px",background:"#111e30",border:"0.5px solid #1e3a5a",borderRadius:6,color:"#60a5fa",cursor:"pointer",fontFamily:"monospace"}}>
-              {loading?"◌":"⟳"} Sync MT5
+              {loading?"◌":"⟳"} Refresh
             </button>
             <button onClick={exportObsidian} disabled={exportMsg==="exporting…"}
               title="Write monthly trade rollups to E:\Obsidian\Trading_Mind\raw\trades\alphaedge\"
@@ -7347,9 +6453,9 @@ function HistoryPage({ history, setHistory }) {
 
         {/* Source note */}
         <div style={{display:"flex",alignItems:"center",gap:8,fontSize:9,color:"#7c8ea8",padding:"0 4px",flexWrap:"wrap"}}>
-          <span style={{color:mt5Trades.length?"#22c55e":"#f59e0b"}}>●</span>
-          <span>Outcomes auto-synced from MT5 Terminal (Trade + History tabs) · AlphaEdge trades only (magic 532025)</span>
-          {lastSync && <span style={{marginLeft:"auto"}}>last sync {fmtTime(lastSync)} IST · {mt5Trades.length} MT5 trade{mt5Trades.length!==1?"s":""}</span>}
+          <span style={{color:lastSync?"#22c55e":"#f59e0b"}}>●</span>
+          <span>Outcomes auto-resolved from live index quotes (SL-first, expiry-aware) · premium-based resolution lands with the Paper Trades revamp</span>
+          {lastSync && <span style={{marginLeft:"auto"}}>last check {fmtTime(lastSync)} IST</span>}
         </div>
 
         {/* ── Filters ── */}
@@ -7363,7 +6469,7 @@ function HistoryPage({ history, setHistory }) {
             ))}
           </div>
           <div style={{display:"flex",gap:3,flexWrap:"wrap"}}>
-            {[["ALL","All Outcomes"],["open","OPEN"],["win","WIN"],["loss","LOSS"],["pending","PENDING"]].map(([v,l])=>(
+            {[["ALL","All Outcomes"],["win","WIN"],["loss","LOSS"],["pending","PENDING"]].map(([v,l])=>(
               <span key={v} onClick={()=>setFilterOutcome(v)} style={{fontSize:9,padding:"3px 9px",borderRadius:5,cursor:"pointer",fontFamily:"monospace",background:filterOutcome===v?"#1e3a5a":"#060d17",color:filterOutcome===v?"#60a5fa":outcomeColor[v]||"#94a3b8",border:`0.5px solid ${filterOutcome===v?"#3b82f6":"#1e3a5a"}`}}>{l}</span>
             ))}
           </div>
@@ -7379,14 +6485,14 @@ function HistoryPage({ history, setHistory }) {
         {loading && (
           <div style={{background:"#0a1628",border:"0.5px dashed #1e3a5a",borderRadius:12,padding:34,textAlign:"center"}}>
             <div style={{fontSize:22,color:"#64748b",animation:"spin 1s linear infinite",display:"inline-block"}}>◷</div>
-            <div style={{fontSize:12,color:"#7c8ea8",marginTop:8,fontFamily:"monospace"}}>Loading & syncing from MT5…</div>
+            <div style={{fontSize:12,color:"#7c8ea8",marginTop:8,fontFamily:"monospace"}}>Loading history…</div>
           </div>
         )}
         {!loading && history.length===0 && (
           <div style={{background:"#0a1628",border:"0.5px dashed #1e3a5a",borderRadius:12,padding:44,textAlign:"center"}}>
             <div style={{fontSize:34,color:"#64748b",marginBottom:10}}>◷</div>
             <div style={{fontSize:13,color:"#7c8ea8"}}>No AlphaEdge trades yet</div>
-            <div style={{fontSize:10,color:"#64748b",marginTop:6}}>Signals generated by AlphaEdge appear here and their outcomes sync from MT5.</div>
+            <div style={{fontSize:10,color:"#64748b",marginTop:6}}>Signals generated by AlphaEdge appear here; outcomes auto-resolve from live quotes.</div>
           </div>
         )}
 
@@ -7395,16 +6501,14 @@ function HistoryPage({ history, setHistory }) {
           <div style={{background:"#0a1628",border:"0.5px solid #1e3a5a",borderRadius:12,overflow:"hidden"}}>
             <div style={{overflowX:"auto"}}>
               <table style={{width:"100%",borderCollapse:"collapse",minWidth:1080}}>
-                <thead><tr style={{background:"#07111f"}}>{head.map(h=>th(h, h==="Result ($)"?{textAlign:"right"}:{}))}</tr></thead>
+                <thead><tr style={{background:"#07111f"}}>{head.map(h=>th(h))}</tr></thead>
                 <tbody>
                   {filtered.map(sig=>{
                     const bc = biasColor[sig.bias]||"#94a3b8";
                     const sm = styleMeta(sig.nature);
-                    const t  = tradeFor(sig);
-                    const st = statusOf(sig, t);
+                    const st = statusOf(sig);
                     const isExp = expanded===sig.id;
                     const sideTxt = sig.bias==="BULLISH"?"BUY":sig.bias==="BEARISH"?"SELL":(sig.bias||"—");
-                    const pnl = t && Number.isFinite(t.profit) ? t.profit : null;
                     return (
                       <React.Fragment key={sig.id}>
                         <tr onClick={()=>setExpanded(isExp?null:sig.id)} style={{cursor:"pointer",borderBottom:"0.5px solid #102033",background:isExp?"#0d1b2d":"#0a1628",borderLeft:`2px solid ${bc}`}}>
@@ -7419,16 +6523,13 @@ function HistoryPage({ history, setHistory }) {
                           <td style={{padding:"9px 9px",fontFamily:"monospace",fontSize:10,color:"#60a5fa",whiteSpace:"nowrap"}}>{Number.isFinite(Number(sig.riskReward))?`1:${Number(sig.riskReward).toFixed(1)}`:"—"}</td>
                           <td style={{padding:"9px 9px",whiteSpace:"nowrap"}}>
                             <span style={{color:st.color,background:st.color+"18",border:`0.5px solid ${st.color}40`,borderRadius:4,padding:"2px 8px",fontFamily:"monospace",fontWeight:700,fontSize:9}}>
-                              {st.live?"● ":""}{st.label}
+                              {st.label}
                             </span>
-                          </td>
-                          <td style={{padding:"9px 9px",textAlign:"right",fontFamily:"monospace",fontWeight:800,fontSize:10,whiteSpace:"nowrap",color:pnl==null?"#64748b":pnl>=0?"#22c55e":"#ef4444"}}>
-                            {pnl==null ? "—" : `${pnl>=0?"+":""}$${pnl.toFixed(2)}`}
                           </td>
                         </tr>
                         {isExp && (
                           <tr>
-                            <td colSpan={11} style={{padding:0,background:"#07111f",borderBottom:"0.5px solid #1e3a5a"}}>
+                            <td colSpan={10} style={{padding:0,background:"#07111f",borderBottom:"0.5px solid #1e3a5a"}}>
                               <div style={{padding:14,display:"grid",gridTemplateColumns:"2fr 1fr 1fr",gap:10}}>
                                 <div style={{background:"#060d17",border:"0.5px solid #1e3a5a",borderRadius:8,padding:"10px 12px"}}>
                                   <div style={{fontSize:8,color:"#94a3b8",marginBottom:5}}>SIGNAL SUMMARY</div>
@@ -7440,22 +6541,17 @@ function HistoryPage({ history, setHistory }) {
                                   </div>
                                 </div>
                                 <div style={{background:"#060d17",border:"0.5px solid #1e3a5a",borderRadius:8,padding:"10px 12px"}}>
-                                  <div style={{fontSize:8,color:"#94a3b8",marginBottom:5}}>MT5 TRADE</div>
-                                  {t ? (<>
-                                    <div style={{fontSize:10,color:"#94a3b8",lineHeight:1.7}}>Ticket: <span style={{color:"#60a5fa",fontFamily:"monospace"}}>#{t.ticket}</span></div>
-                                    <div style={{fontSize:10,color:"#94a3b8",lineHeight:1.7}}>State: <span style={{color:st.color}}>{t.state}</span></div>
-                                    <div style={{fontSize:10,color:"#94a3b8",lineHeight:1.7}}>Open: <span style={{color:"#e2e8f0",fontFamily:"monospace"}}>{fmtPx(t.open_price)}</span>{t.close_price?<> → <span style={{color:"#e2e8f0",fontFamily:"monospace"}}>{fmtPx(t.close_price)}</span></>:""}</div>
-                                    <div style={{fontSize:10,color:"#94a3b8",lineHeight:1.7}}>Vol: <span style={{color:"#e2e8f0",fontFamily:"monospace"}}>{t.volume}</span> · P&L <span style={{color:t.profit>=0?"#22c55e":"#ef4444",fontFamily:"monospace"}}>{t.profit>=0?"+":""}${t.profit.toFixed(2)}</span></div>
-                                  </>) : (
-                                    <div style={{fontSize:10,color:"#7c8ea8",lineHeight:1.6}}>
-                                      No MT5 trade linked ({sig.tradeType==="Paper"?"paper signal":"not executed"}).
-                                      <div style={{marginTop:6,display:"flex",gap:3,flexWrap:"wrap"}}>
-                                        {[["pending","PEND"],["win","WIN"],["loss","LOSS"]].map(([v,l])=>(
-                                          <button key={v} onClick={(e)=>{e.stopPropagation();setManualOutcome(sig.id,v);}} style={{fontSize:8,padding:"2px 7px",borderRadius:4,cursor:"pointer",fontFamily:"monospace",fontWeight:700,background:sig.outcome===v?(outcomeColor[v]||"#64748b")+"30":"#0a1628",color:sig.outcome===v?(outcomeColor[v]||"#94a3b8"):"#64748b",border:`0.5px solid ${sig.outcome===v?(outcomeColor[v]||"#64748b")+"70":"#1e3a5a"}`}}>{l}</button>
-                                        ))}
-                                      </div>
+                                  <div style={{fontSize:8,color:"#94a3b8",marginBottom:5}}>OUTCOME</div>
+                                  <div style={{fontSize:10,color:"#7c8ea8",lineHeight:1.6}}>
+                                    {sig.resolvedBy
+                                      ? <>Auto-resolved ({sig.resolvedBy}{Number.isFinite(Number(sig.resolvedPrice))?` @ ${fmtPx(sig.resolvedPrice)}`:""}).</>
+                                      : "Paper signal — mark manually or wait for the auto-resolver."}
+                                    <div style={{marginTop:6,display:"flex",gap:3,flexWrap:"wrap"}}>
+                                      {[["pending","PEND"],["win","WIN"],["loss","LOSS"]].map(([v,l])=>(
+                                        <button key={v} onClick={(e)=>{e.stopPropagation();setManualOutcome(sig.id,v);}} style={{fontSize:8,padding:"2px 7px",borderRadius:4,cursor:"pointer",fontFamily:"monospace",fontWeight:700,background:sig.outcome===v?(outcomeColor[v]||"#64748b")+"30":"#0a1628",color:sig.outcome===v?(outcomeColor[v]||"#94a3b8"):"#64748b",border:`0.5px solid ${sig.outcome===v?(outcomeColor[v]||"#64748b")+"70":"#1e3a5a"}`}}>{l}</button>
+                                      ))}
                                     </div>
-                                  )}
+                                  </div>
                                 </div>
                                 <div style={{background:"#060d17",border:"0.5px solid #1e3a5a",borderRadius:8,padding:"10px 12px"}}>
                                   <div style={{fontSize:8,color:"#ef4444",marginBottom:5}}>RISK NOTES</div>
@@ -7499,7 +6595,7 @@ function HistoryPage({ history, setHistory }) {
                     <div style={{overflowX:"auto"}}>
                       <table style={{width:"100%",borderCollapse:"collapse",minWidth:330}}>
                         <thead><tr style={{background:"#07111f"}}>
-                          {[keyLabel,"Trades","Win%","Avg RR","Net R","$",""].map(h=>(
+                          {[keyLabel,"Trades","Win%","Avg RR","Net R",""].map(h=>(
                             <th key={h} style={{padding:"6px 7px",textAlign:h===keyLabel?"left":"right",fontSize:8,color:"#7c8ea8",letterSpacing:"0.04em",borderBottom:"0.5px solid #1e3a5a",whiteSpace:"nowrap"}}>{h.toUpperCase()}</th>
                           ))}
                         </tr></thead>
@@ -7511,11 +6607,10 @@ function HistoryPage({ history, setHistory }) {
                               <td style={{padding:"7px 7px",fontSize:10,textAlign:"right",fontFamily:"monospace",color:wrColor(g.winRate)}}>{g.winRate.toFixed(0)}%</td>
                               <td style={{padding:"7px 7px",fontSize:10,color:"#60a5fa",textAlign:"right",fontFamily:"monospace"}}>{g.avgRR?`1:${g.avgRR.toFixed(1)}`:"—"}</td>
                               <td style={{padding:"7px 7px",fontSize:10,textAlign:"right",fontFamily:"monospace",fontWeight:800,color:good?"#22c55e":"#ef4444"}}>{good?"+":""}{g.netR.toFixed(1)}</td>
-                              <td style={{padding:"7px 7px",fontSize:9,textAlign:"right",fontFamily:"monospace",color:g.netUsd>=0?"#69db7c":"#f85149"}}>{g.netUsd?`${g.netUsd>=0?"+":""}${g.netUsd.toFixed(0)}`:"—"}</td>
                               <td style={{padding:"7px 5px",fontSize:10,textAlign:"center"}}>{good?<span style={{color:"#22c55e"}}>✓</span>:<span style={{color:"#ef4444"}}>✕</span>}</td>
                             </tr>
                           );})}
-                          {rows.length===0 && <tr><td colSpan={7} style={{padding:14,textAlign:"center",fontSize:10,color:"#64748b"}}>No data yet</td></tr>}
+                          {rows.length===0 && <tr><td colSpan={6} style={{padding:14,textAlign:"center",fontSize:10,color:"#64748b"}}>No data yet</td></tr>}
                         </tbody>
                       </table>
                     </div>
@@ -7945,7 +7040,7 @@ const MTF_TFS = ["1m","5m","15m","1H","4H","1D","1W"];
 const ICT_CONCEPTS = ["Order Block","FVG","BOS","CHoCH","Liquidity Sweep","EMA Alignment","Kill Zone","PD Array","Inducement","MSS"];
 
 function MTFConfluencePage({ candles, prices }) {
-  const [asset, setAsset] = useState("BTCUSD");
+  const [asset, setAsset] = useState("NIFTY50");
   const [loading, setLoading] = useState(false);
   const [analysis, setAnalysis] = useState(null);
   const [error, setError] = useState(null);
@@ -8235,7 +7330,7 @@ function JournalPage() {
   const [filter,    setFilter]    = useState("ALL");
   const [loading,   setLoading]   = useState(true);
 
-  const empty = { asset:"BTCUSD",dir:"LONG",entry:"",exit:"",size:"",pnl:"",
+  const empty = { asset:"NIFTY50",dir:"LONG",entry:"",exit:"",size:"",pnl:"",
     outcome:"win",emotion:"Calm",mistake:"None",setup:"ICT Order Block",
     grade:"A",note:"",screenshot:"",date:new Date().toISOString().split("T")[0] };
   const [form, setForm] = useState(empty);
@@ -8753,6 +7848,7 @@ const DHAN_INSTRUMENTS = {
   NIFTY50:   { securityId: "13", segment: "IDX_I", instrument: "INDEX", label: "Nifty 50" },
   BANKNIFTY: { securityId: "25", segment: "IDX_I", instrument: "INDEX", label: "Bank Nifty" },
   SENSEX:    { securityId: "51", segment: "IDX_I", instrument: "INDEX", label: "Sensex" },
+  FINNIFTY:  { securityId: "27", segment: "IDX_I", instrument: "INDEX", label: "Fin Nifty" },
 };
 
 // Dhan intraday interval (minutes) keyed by our timeframe label.
@@ -8895,20 +7991,19 @@ async function fetchDhanNifty() {
   } catch { return null; }
 }
 
-// Live prices straight from the MT5 terminal, via the local bridge.
-// Uses whichever MT5 account has a Bridge URL set (price data is the same for
-// demo/live), so it works regardless of the Execution mode. Returns {} if no
-// bridge URL is set or the bridge isn't running — callers then use web sources.
+// Local Dhan/India bridge URL (Settings may override; default is :5000).
 function getAnyBridgeUrl() {
   try {
     const s = JSON.parse(localStorage.getItem("alphaedge_settings") || "{}");
-    // Fall back to the local bridge (always on :5000) so Dhan/Options/History
-    // features work out-of-the-box when the bridge is running.
-    return s?.broker?.mt5?.demo?.bridgeUrl || s?.broker?.mt5?.live?.bridgeUrl || DEFAULT_BRIDGE_URL;
+    // Fall back to the local bridge (always on :5000) so Dhan/Options features
+    // work out-of-the-box when the bridge is running.
+    return s?.broker?.bridgeUrl || s?.broker?.mt5?.demo?.bridgeUrl || DEFAULT_BRIDGE_URL;
   } catch { return DEFAULT_BRIDGE_URL; }
 }
 
-async function fetchMT5Prices() {
+// Live index quotes (Dhan, server-side) from the local bridge. Returns {} if
+// the bridge isn't running — callers then use web sources.
+async function fetchBridgePrices() {
   const base = getAnyBridgeUrl();
   if (!base) return {};
   const url = base.replace(/\/signal\/?$/, "") + "/price";
@@ -8918,32 +8013,6 @@ async function fetchMT5Prices() {
     const d = await r.json();
     return (d && typeof d === "object" && !d.error) ? d : {};
   } catch { return {}; }
-}
-
-async function fetchMT5Account() {
-  const base = getAnyBridgeUrl();
-  if (!base) return null;
-  const url = base.replace(/\/signal\/?$/, "") + "/account";
-  try {
-    const r = await fetch(url, { signal: AbortSignal.timeout(4000) });
-    if (!r.ok) return null;
-    const d = await r.json();
-    return (d && d.balance != null) ? d : null;
-  } catch { return null; }
-}
-
-// AlphaEdge-only MT5 trades (open + closed, magic-filtered) from the bridge —
-// the source of truth for History outcomes. Returns [] if the bridge is down.
-async function fetchMT5History(days = 30) {
-  const base = getAnyBridgeUrl();
-  if (!base) return [];
-  const url = base.replace(/\/signal\/?$/, "") + `/history?days=${days}`;
-  try {
-    const r = await fetch(url, { signal: AbortSignal.timeout(6000) });
-    if (!r.ok) return [];
-    const d = await r.json();
-    return Array.isArray(d?.trades) ? d.trades : [];
-  } catch { return []; }
 }
 
 // Live option chain (ATM±range, greeks/IV) via the bridge. Falls back to the
@@ -8963,201 +8032,55 @@ async function fetchOptionChain(underlying, range = 6) {
   } catch (e) { return { ok:false, error:String(e) }; }
 }
 
-// Match an AlphaEdge signal to its MT5 trade. Primary: stored ticket. Fallback:
-// same symbol + side, opened within 12h after the signal, nearest entry price.
-function matchTradeToSignal(sig, trades) {
-  if (!sig || !Array.isArray(trades)) return null;
-  if (sig.mt5Ticket) {
-    const byTicket = trades.find(t => String(t.ticket) === String(sig.mt5Ticket));
-    if (byTicket) return byTicket;
-  }
-  const side = sig.bias === "BULLISH" ? "buy" : sig.bias === "BEARISH" ? "sell" : null;
-  if (!side) return null;
-  const symKey = String(sig.asset || "").replace(/[^A-Z0-9]/gi, "").toUpperCase();
-  const sigSec = Math.floor((sig.timestamp || 0) / 1000);
-  const cands = trades.filter(t => {
-    const tSym = String(t.symbol || "").replace(/[^A-Z0-9]/gi, "").toUpperCase();
-    const sameSym = tSym.includes(symKey) || symKey.includes(tSym);
-    const dt = (t.open_time || 0) - sigSec;
-    return sameSym && t.side === side && dt >= -300 && dt <= 12 * 3600;
-  });
-  if (!cands.length) return null;
-  const entry = Number(sig.entry) || 0;
-  return cands.sort((a, b) =>
-    Math.abs((a.open_price || 0) - entry) - Math.abs((b.open_price || 0) - entry))[0];
-}
-
 // ─── REAL PRICE FETCHER ───────────────────────────────────────────────────────
+// Yahoo Finance symbols for each index (URL-encoded), used when the bridge is down.
+const YAHOO_INDEX = {
+  NIFTY50:   "%5ENSEI",
+  BANKNIFTY: "%5ENSEBANK",
+  SENSEX:    "%5EBSESN",
+  FINNIFTY:  "NIFTY_FIN_SERVICE.NS",
+};
+
 async function fetchRealPrices() {
   const result = {};
 
-  // ── Primary: live prices from the MT5 terminal (via local bridge) ──────────
-  const mt5p = await fetchMT5Prices();
-  if (mt5p.BTCUSD) result.BTCUSD = mt5p.BTCUSD;
-  if (mt5p.ETHUSD) result.ETHUSD = mt5p.ETHUSD;
+  // ── Primary: Dhan index quotes via the local bridge ────────────────────────
+  const bp = await fetchBridgePrices();
+  ASSETS.forEach(a => { if (bp[a.id]) result[a.id] = bp[a.id]; });
 
-  // ── BTC + ETH fallback: Binance (only for whatever MT5 didn't provide) ─────
-  if (!result.BTCUSD || !result.ETHUSD) {
+  // ── Nifty fallback: Dhan direct via CORS proxy (browser token) ─────────────
+  if (!result.NIFTY50) {
+    const n = await fetchDhanNifty();
+    if (n) result.NIFTY50 = n;
+  }
+
+  // ── Last resort per index: Yahoo Finance ───────────────────────────────────
+  for (const a of ASSETS) {
+    if (result[a.id]) continue;
+    const sym = YAHOO_INDEX[a.id];
+    if (!sym) continue;
     try {
       const resp = await fetch(
-        "https://api.binance.com/api/v3/ticker/24hr?symbols=%5B%22BTCUSDT%22,%22ETHUSDT%22%5D",
+        `https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=1m&range=1d`,
         { signal: AbortSignal.timeout(4000) }
       );
-      if (resp.ok) {
-        const data = await resp.json();
-        data.forEach(t => {
-          if (t.symbol === "BTCUSDT" && !result.BTCUSD)
-            result.BTCUSD = { price:parseFloat(t.lastPrice), change:parseFloat(t.priceChangePercent), source:"Binance" };
-          if (t.symbol === "ETHUSDT" && !result.ETHUSD)
-            result.ETHUSD = { price:parseFloat(t.lastPrice), change:parseFloat(t.priceChangePercent), source:"Binance" };
-        });
+      if (!resp.ok) continue;
+      const meta = (await resp.json())?.chart?.result?.[0]?.meta;
+      if (meta?.regularMarketPrice) {
+        const cur  = parseFloat(meta.regularMarketPrice);
+        const prev = parseFloat(meta.chartPreviousClose || meta.regularMarketPreviousClose || cur);
+        result[a.id] = { price:cur, change:prev?((cur-prev)/prev)*100:0, source:"Yahoo" };
       }
     } catch {}
   }
 
-  // ── Gold: MT5 first, then web fallbacks ────────────────────────────────────
-  let goldPrice = mt5p.XAUUSD || null;
-
-  // Source 1: goldprice.org public CORS-enabled API (real-time spot ~$4538)
-  if (!goldPrice) {
-    try {
-      const resp = await fetch(
-        "https://data-asg.goldprice.org/dbXRates/USD",
-        { signal: AbortSignal.timeout(4000) }
-      );
-      if (resp.ok) {
-        const gd    = await resp.json();
-        const item  = gd?.items?.[0];
-        const price = parseFloat(item?.xauPrice || 0);
-        if (price > 1000) goldPrice = { price, change: 0, source: "GoldPrice.org" };
-      }
-    } catch {}
-  }
-
-  // Source 2: gold-api.com (free, no key)
-  if (!goldPrice) {
-    try {
-      const resp = await fetch(
-        "https://api.gold-api.com/price/XAU",
-        { signal: AbortSignal.timeout(4000) }
-      );
-      if (resp.ok) {
-        const gd    = await resp.json();
-        const price = parseFloat(gd?.price || gd?.Price || 0);
-        if (price > 1000) goldPrice = { price, change: parseFloat(gd?.chp || 0), source: "GoldAPI.com" };
-      }
-    } catch {}
-  }
-
-  // Source 3: Yahoo Finance GC=F using last real candle close (not cached meta)
-  if (!goldPrice) {
-    try {
-      const resp = await fetch(
-        "https://query1.finance.yahoo.com/v8/finance/chart/GC%3DF?interval=1m&range=1d",
-        { signal: AbortSignal.timeout(4000) }
-      );
-      if (resp.ok) {
-        const gd      = await resp.json();
-        const result0 = gd?.chart?.result?.[0];
-        const closes  = result0?.indicators?.quote?.[0]?.close || [];
-        const cur     = [...closes].reverse().find(v => v != null && v > 1000);
-        const prev    = parseFloat(result0?.meta?.chartPreviousClose || 0);
-        if (cur) goldPrice = { price: cur, change: prev ? ((cur-prev)/prev)*100 : 0, source: "Yahoo GC=F" };
-      }
-    } catch {}
-  }
-
-  // Source 4: metals.dev via CORS proxy
-  if (!goldPrice) {
-    try {
-      const url  = encodeURIComponent("https://api.metals.dev/v1/spot?api_key=goldbackedtoken&unit=toz&currency=USD");
-      const resp = await fetch(`https://api.allorigins.win/raw?url=${url}`, { signal: AbortSignal.timeout(5000) });
-      if (resp.ok) {
-        const gd    = await resp.json();
-        const price = parseFloat(gd?.metals?.gold || 0);
-        if (price > 1000) goldPrice = { price, change: 0, source: "Metals.dev" };
-      }
-    } catch {}
-  }
-
-  if (goldPrice) result.XAUUSD = goldPrice;
-
-  // ── Nifty 50: MT5 first (if offered), then web sources ─────────────────────
-  let nifty = mt5p.NIFTY50 || null;
-
-  // Source 1: Dhan (most accurate, live, via proxy)
-  if (!nifty) nifty = await fetchDhanNifty();
-
-  // Source 2: Yahoo Finance ^NSEI
-  if (!nifty) {
-    try {
-      const resp = await fetch(
-        "https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEI?interval=1m&range=1d",
-        { signal: AbortSignal.timeout(4000) }
-      );
-      if (resp.ok) {
-        const nd   = await resp.json();
-        const meta = nd?.chart?.result?.[0]?.meta;
-        if (meta?.regularMarketPrice) {
-          const cur  = parseFloat(meta.regularMarketPrice);
-          const prev = parseFloat(meta.chartPreviousClose || meta.regularMarketPreviousClose || cur);
-          nifty = { price:cur, change:prev?((cur-prev)/prev)*100:0, source:"Yahoo ^NSEI" };
-        }
-      }
-    } catch {}
-  }
-
-  // Source 3: Yahoo Finance NSEI.NS (Nifty index via allorigins proxy)
-  if (!nifty) {
-    try {
-      const url = encodeURIComponent("https://query2.finance.yahoo.com/v8/finance/chart/^NSEI?interval=1m&range=1d");
-      const resp = await fetch(`https://api.allorigins.win/raw?url=${url}`,
-        { signal: AbortSignal.timeout(5000) }
-      );
-      if (resp.ok) {
-        const nd   = await resp.json();
-        const meta = nd?.chart?.result?.[0]?.meta;
-        if (meta?.regularMarketPrice) {
-          const cur  = parseFloat(meta.regularMarketPrice);
-          const prev = parseFloat(meta.chartPreviousClose || cur);
-          nifty = { price:cur, change:prev?((cur-prev)/prev)*100:0, source:"Yahoo2 ^NSEI" };
-        }
-      }
-    } catch {}
-  }
-
-  // Source 4: NSEIndia open data (no key, browser accessible)
-  if (!nifty) {
-    try {
-      const resp = await fetch(
-        "https://www.nseindia.com/api/allIndices",
-        {
-          signal: AbortSignal.timeout(5000),
-          headers: { "Accept":"application/json", "Referer":"https://www.nseindia.com/" }
-        }
-      );
-      if (resp.ok) {
-        const nd = await resp.json();
-        const nifty50 = nd?.data?.find(d=>d.index==="NIFTY 50");
-        if (nifty50) {
-          nifty = {
-            price:  parseFloat(nifty50.last || nifty50.indexValue || 0),
-            change: parseFloat(nifty50.percentChange || 0),
-            source: "NSEIndia",
-          };
-        }
-      }
-    } catch {}
-  }
-
-  if (nifty) result.NIFTY50 = nifty;
   return result;
 }
 
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
 export default function AlphaEdge() {
   const [page, setPage]           = useState(0);
-  const [activeAsset, setActiveAsset] = useState("BTCUSD");
+  const [activeAsset, setActiveAsset] = useState("NIFTY50");
   const [history, setHistory]     = useState([]);
   const [clock, setClock]         = useState(new Date());
   const [autoSignalOn, setAutoSignalOn] = useState(
@@ -9190,18 +8113,11 @@ export default function AlphaEdge() {
     loadHistory().then(h=>setHistory(h));
   },[]);
 
-  // App-wide MT5 outcome reconcile (every 60s) — keeps outcomes, cooldown
-  // guardrails and broker-realized stats current on EVERY page, not just when
-  // the History page happens to be open.
+  // App-wide price-based outcome resolver (every 60s) — keeps outcomes and the
+  // cooldown guardrails current on EVERY page, not just when History is open.
   useEffect(()=>{
     let alive = true;
     const sync = async () => {
-      try {
-        const { changed, next } = await reconcileHistoryFromMT5(45);
-        if (alive && changed && next) setHistory(next);
-      } catch { /* bridge offline — retry next tick */ }
-      // Price-based resolver for signals MT5 never sees (NSE indices) — runs
-      // AFTER the MT5 reconcile so terminal-sourced patches always land first.
       try {
         const { changed, next } = await autoResolveFromPrice();
         if (alive && changed && next) setHistory(next);
@@ -9283,13 +8199,15 @@ export default function AlphaEdge() {
     }
   }, []);
 
-  // Load REAL intraday candles from Dhan for Indian indices (chart data).
+  // Load REAL intraday candles from Dhan for all Indian indices (chart data).
+  // Sequential on purpose — the bridge serialises Dhan calls anyway.
   const loadDhanCandles = useCallback(async () => {
-    if (!getDhanToken()) return;
-    const real = await fetchDhanChartCandles("NIFTY50", "5m");
-    if (real && real.length) {
-      realCandlesRef.current.add("NIFTY50");
-      setCandles(prev => ({ ...prev, NIFTY50: real.slice(-90) }));
+    for (const a of ASSETS) {
+      const real = await fetchDhanChartCandles(a.id, "5m").catch(() => null);
+      if (real && real.length) {
+        realCandlesRef.current.add(a.id);
+        setCandles(prev => ({ ...prev, [a.id]: real.slice(-90) }));
+      }
     }
   }, []);
 
@@ -9347,34 +8265,6 @@ export default function AlphaEdge() {
     return ()=>clearInterval(t);
   },[]);
 
-  // ── Trade-CLOSED Telegram watcher ──────────────────────────────────────────
-  // Polls MT5 history app-wide and alerts on newly-closed AlphaEdge trades.
-  // Dedups via localStorage; the first run on an empty store is a silent
-  // baseline so historical closes don't spam on first launch.
-  useEffect(()=>{
-    const KEY = "alphaedge_notified_closed";
-    let seen; try { seen = new Set(JSON.parse(localStorage.getItem(KEY)||"[]")); } catch { seen = new Set(); }
-    let baseline = seen.size === 0;
-    let stop = false;
-    const tick = async () => {
-      const trades = await fetchMT5History(7);
-      if (stop || !Array.isArray(trades)) return;
-      let changed = false;
-      for (const t of trades) {
-        const id = String(t.ticket);
-        if (t.state === "closed" && !seen.has(id)) {
-          if (!baseline) sendTradeAlert("closed", { venue:"MT5", ...t });
-          seen.add(id); changed = true;
-        }
-      }
-      if (baseline) { baseline = false; changed = true; }
-      if (changed) { try { localStorage.setItem(KEY, JSON.stringify([...seen].slice(-1000))); } catch {} }
-    };
-    tick();
-    const iv = setInterval(tick, 30000);
-    return () => { stop = true; clearInterval(iv); };
-  }, []);
-
   // Called by AISignalPage after saving a new signal
   const handleSignalSaved = useCallback((updatedHistory)=>{
     setHistory(updatedHistory);
@@ -9395,9 +8285,7 @@ export default function AlphaEdge() {
 
     <BacktestPage key="bt" candles={candles}/>,
 
-    <ExecutionPage key="exec" prices={prices}/>,
-
-    <PortfolioPage key="port"/>,
+    <ExecutionPage key="exec"/>,
 
     <AlertsPage key="alerts" prices={prices} history={history}/>,
 
@@ -9449,7 +8337,7 @@ export default function AlphaEdge() {
         {sideItems.map((s,i)=>{
           const isActive = page===i;
           // Badges: Alerts(5)=live price alerts unread, History(6)=pending, Calendar(8)=high-impact events
-          const priceAlertCount = [prices.BTCUSD, prices.XAUUSD, prices.ETHUSD, prices.NIFTY50].filter(Boolean).length;
+          const priceAlertCount = [prices.NIFTY50, prices.BANKNIFTY, prices.SENSEX, prices.FINNIFTY].filter(Boolean).length;
           const badge = i===5 ? priceAlertCount
             : i===6 && pendingCount>0 ? pendingCount
             : i===8 ? getEconEvents().filter(e=>e.impact==="high"&&!e.actual&&new Date(e.datetime).getTime()>=Date.now()).length
@@ -9526,13 +8414,7 @@ export default function AlphaEdge() {
               fontSize:11,color:"white",fontWeight:700,flexShrink:0}}>A</div>
             <div>
               <div style={{fontSize:11,color:"#e2e8f0",fontWeight:600}}>Trader</div>
-              {(()=>{
-                const em=getExecMode();
-                const m=em==="mt5_live"?{t:"MT5 Live",c:"#ef4444"}
-                      :em==="mt5_demo"?{t:"MT5 Demo",c:"#22c55e"}
-                      :{t:"Paper Mode",c:"#60a5fa"};
-                return <div style={{fontSize:8,color:m.c}}>● {m.t}</div>;
-              })()}
+              <div style={{fontSize:8,color:"#60a5fa"}}>● Paper Mode</div>
             </div>
           </div>
         </div>
@@ -9552,8 +8434,8 @@ export default function AlphaEdge() {
           <div style={{flex:1}}/>
 
           {/* History quick-stat in header when on other pages */}
-          {page!==6 && history.length>0 && (
-            <span onClick={()=>setPage(6)}
+          {page!==5 && history.length>0 && (
+            <span onClick={()=>setPage(5)}
               style={{fontSize:9,color:"#a78bfa",background:"#1e1040",padding:"3px 8px",borderRadius:5,
                 border:"0.5px solid #7c3aed40",cursor:"pointer",letterSpacing:"0.04em"}}>
               ◷ {history.length} signals · {pendingCount} pending
@@ -9569,7 +8451,7 @@ export default function AlphaEdge() {
             background: priceSource==="live"?"#052e16": priceSource==="simulated"?"#1c1300":"#0a1628",
             border:`0.5px solid ${priceSource==="live"?"#22c55e30": priceSource==="simulated"?"#f59e0b30":"#1e3a5a"}`}}>
             {priceSource==="live"
-              ? `📡 Live${getDhanToken()?" · Dhan+Binance":" · Binance+Yahoo"}`
+              ? `📡 Live${getDhanToken()?" · Dhan":" · Yahoo"}`
               : priceSource==="simulated"?"⚠ Simulated":"⟳ Fetching..."}
           </span>
 

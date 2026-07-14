@@ -46,6 +46,7 @@ UNDERLYINGS = {
     "NIFTY50":   {"id": 13, "seg": "IDX_I"},
     "BANKNIFTY": {"id": 25, "seg": "IDX_I"},
     "SENSEX":    {"id": 51, "seg": "IDX_I"},
+    "FINNIFTY":  {"id": 27, "seg": "IDX_I"},   # monthly-only expiries since NSE dropped its weekly
 }
 
 POLL_SECONDS    = 60     # snapshot cadence

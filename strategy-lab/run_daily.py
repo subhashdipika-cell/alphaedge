@@ -1,7 +1,8 @@
 """
-run_daily.py — Daily pipeline orchestrator
-Runs collector for N hours, then runs the backtester, saves results, and
-appends a summary to the Obsidian Trading Mind wiki.
+run_daily.py — Daily pipeline orchestrator (Indian indices only)
+Pulls Dhan candles, runs the options-chain collector through the NSE session,
+then runs the backtester, saves results, and appends a summary to the
+Obsidian Trading Mind wiki.
 
 Usage:
   python run_daily.py              # collect 8h then analyse
@@ -87,25 +88,20 @@ def stop_options_collector(proc):
     log("Options collector stopped (see dhan_options.log).")
 
 
-def run_collector(hours: float):
-    log(f"Starting collector for {hours}h...")
-    proc = subprocess.Popen(
-        [sys.executable, str(ROOT / "collector.py")],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-    )
+def wait_for_options_collector(proc, hours: float):
+    """Hold the pipeline (and keep-awake) while the options collector runs.
+    The collector self-gates on market hours and exits after the close; the
+    hours cap is a safety net so the pipeline can't hang forever."""
+    if proc is None:
+        log("No options collector running — nothing to wait for.")
+        return
     deadline = time.time() + hours * 3600
-    try:
-        while time.time() < deadline:
-            line = proc.stdout.readline()
-            if line:
-                print("  [collector]", line.rstrip())
-            elif proc.poll() is not None:
-                break
-            time.sleep(1)
-    finally:
-        proc.terminate()
-        proc.wait()
-    log("Collector stopped.")
+    log(f"Waiting for options collector (cap {hours}h)...")
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            break
+        time.sleep(30)
+    log("Options collection window over.")
 
 
 def refresh_dhan_token():
@@ -173,14 +169,14 @@ def save_wiki_summary(results: list[dict], max_dd: float):
 
     if not scalp_path.exists():
         scalp_path.write_text(f"""---
-tags: [strategy, scalp, btc, xauusd]
+tags: [strategy, scalp, nifty, banknifty]
 sources: []
 last_updated: {today}
 ---
 
 # Scalp Lab — Adaptive Strategy Discovery
 
-Daily backtest results from live MT5 M1/M5/H1 data on XAUUSD and BTCUSD.
+Daily backtest results from Dhan M1/M5/H1 index-futures data (NIFTY/BANKNIFTY/SENSEX).
 TSL rules: 1R→breakeven, 2R→lock 1.5R, 3R→lock 2.5R, 4R→lock 3.5R.
 Max DD guards: 500 pips (also tested 1000 pips).
 
@@ -269,9 +265,9 @@ def main():
         log("Keep-awake ON — system held in working state during collection.")
         try:
             run_dhan_collector(days=args.dhan_days)
-            opt_proc = start_options_collector()     # parallel options-chain capture
+            opt_proc = start_options_collector()     # options-chain capture (self-gates on market hours)
             try:
-                run_collector(hours=args.collect_hours)
+                wait_for_options_collector(opt_proc, hours=args.collect_hours)
             finally:
                 stop_options_collector(opt_proc)
         finally:
