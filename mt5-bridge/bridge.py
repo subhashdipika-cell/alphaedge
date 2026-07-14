@@ -36,6 +36,8 @@ try:
 except ImportError:
     DhanContext = _dhanhq = None  # /dhan/* endpoints return a friendly error
 
+import oi_metrics  # Trending-OI + premium series from the collected chain CSVs
+
 
 # ─── CONFIG — edit these to taste ─────────────────────────────────────────────
 HOST = "127.0.0.1"
@@ -262,18 +264,35 @@ def _optionchain_from_csv(under_name, rng):
         return None
 
 
+# In-memory option-chain cache. Dhan's chain endpoint is rate-limited (~1 req/3s),
+# so cache each (underlying, expiry) response for 45s. The app, the score scanner
+# and the paper-trade tracker can then all poll freely without hammering Dhan.
+_CHAIN_CACHE = {}   # (underlying, expiry|"") -> {"ts": float, "data": {...}}
+_CHAIN_TTL = 45.0
+
+
 def dhan_optionchain(req):
     """Live option chain (ATM +/- range) with greeks/IV for the strike selector.
-    Falls back to the last collected snapshot when the market is closed."""
+    Accepts an optional `expiry` (else nearest) and returns the full `expiries`
+    list so the app can offer weekly-vs-monthly selection. Falls back to the last
+    collected snapshot when the market is closed. 45s in-memory cache."""
+    under_name = req.get("underlying", "")
+    rng = int(req.get("range", 6))
+    want_expiry = str(req.get("expiry") or "")
+
+    cache_key = (under_name, want_expiry)
+    hit = _CHAIN_CACHE.get(cache_key)
+    if hit and (time.time() - hit["ts"] < _CHAIN_TTL):
+        return hit["data"]
+
     if _dhanhq is None:
         return {"ok": False, "error": "dhanhq not installed on bridge host"}
     token, client = _dhan_credentials(req)
     if not token or not client:
         return {"ok": False, "error": "missing Dhan token/clientId"}
-    meta = DHAN_INSTRUMENTS.get(req.get("underlying", ""))
+    meta = DHAN_INSTRUMENTS.get(under_name)
     if not meta:
-        return {"ok": False, "error": f"unknown underlying '{req.get('underlying')}'"}
-    rng = int(req.get("range", 6))
+        return {"ok": False, "error": f"unknown underlying '{under_name}'"}
     try:
         dhan = _dhanhq(DhanContext(client, token))
         sid = int(meta["security_id"]); seg = meta["segment"]
@@ -282,11 +301,15 @@ def dhan_optionchain(req):
         if isinstance(eld, dict):
             eld = eld.get("data") or []
         if not eld:
-            fb = _optionchain_from_csv(req.get("underlying"), rng)
+            fb = _optionchain_from_csv(under_name, rng)
             return fb if fb else {"ok": False, "error": "no expiries (market closed?) and no saved snapshot"}
         import datetime as _dt
         today = _dt.datetime.now(_dt.timezone.utc).astimezone(_dt.timezone(_dt.timedelta(hours=5, minutes=30))).strftime("%Y-%m-%d")
-        expiry = next((e for e in eld if str(e) >= today), eld[0])
+        expiries = [str(e) for e in eld]
+        if want_expiry and want_expiry in expiries:
+            expiry = want_expiry
+        else:
+            expiry = next((e for e in expiries if e >= today), expiries[0])
         time.sleep(0.3)
         oc = dhan.option_chain(sid, seg, expiry)
         d = oc.get("data", oc)
@@ -295,7 +318,7 @@ def dhan_optionchain(req):
         under = float(d.get("last_price") or 0)
         ocmap = d.get("oc") or {}
         if not ocmap or not under:
-            fb = _optionchain_from_csv(req.get("underlying"), rng)
+            fb = _optionchain_from_csv(under_name, rng)
             return fb if fb else {"ok": False, "error": "empty option chain"}
         strikes = sorted(ocmap.keys(), key=lambda s: float(s))
         floats = [float(s) for s in strikes]
@@ -314,12 +337,15 @@ def dhan_optionchain(req):
             rows.append({"strike": round(float(sk), 2), "atm": float(sk) == floats[atm_i],
                          "ce": leg("ce"), "pe": leg("pe")})
         atm_ce_iv = next((r["ce"]["iv"] for r in rows if r["atm"]), 0)
-        return {"ok": True, "underlying": req.get("underlying"), "under_ltp": round(under, 2),
-                "expiry": expiry, "isExpiryToday": str(expiry) == today,
-                "atmStrike": floats[atm_i], "ivPercentile": _atm_iv_percentile(req.get("underlying"), atm_ce_iv),
-                "strikes": rows}
+        result = {"ok": True, "underlying": under_name, "under_ltp": round(under, 2),
+                  "expiry": expiry, "isExpiryToday": str(expiry) == today,
+                  "expiries": expiries,
+                  "atmStrike": floats[atm_i], "ivPercentile": _atm_iv_percentile(under_name, atm_ce_iv),
+                  "strikes": rows}
+        _CHAIN_CACHE[cache_key] = {"ts": time.time(), "data": result}
+        return result
     except Exception as e:
-        fb = _optionchain_from_csv(req.get("underlying"), rng)
+        fb = _optionchain_from_csv(under_name, rng)
         return fb if fb else {"ok": False, "error": f"option chain failed: {e}"}
 
 
@@ -709,6 +735,20 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path.startswith("/dhan/optionchain"):
             result = dhan_optionchain(body)
+            self._send(200 if result.get("ok") else 400, result)
+            return
+        if parsed.path.startswith("/dhan/oitrend"):
+            result = oi_metrics.build_oitrend(
+                body.get("underlying", ""),
+                bucket_min=int(body.get("bucketMin", 5)),
+            )
+            self._send(200 if result.get("ok") else 400, result)
+            return
+        if parsed.path.startswith("/dhan/premium"):
+            result = oi_metrics.build_premium_series(
+                body.get("underlying", ""), body.get("strike"), body.get("type"),
+                expiry=body.get("expiry"), since_ts=body.get("sinceTs"),
+            )
             self._send(200 if result.get("ok") else 400, result)
             return
         if parsed.path.startswith("/obsidian/monthly"):

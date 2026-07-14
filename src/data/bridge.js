@@ -236,6 +236,38 @@ export async function fetchVix() {
   } catch { return null; }
 }
 
+// Trending-OI time series (bucketed per-strike OI/LTP/IV/volume) for one index,
+// from today's collected chain CSV (stale-csv off-hours). The oi.js engine
+// derives velocity/acceleration/walls/centroids/matrix/smart-money from this.
+// Returns the bridge payload {ok, times[], underLtp[], strikes[...]} or {ok:false}.
+export async function fetchOiTrend(underlying, bucketMin = 5) {
+  const base = bridgeBaseUrl();
+  if (!base) return { ok: false, error: "no bridge URL" };
+  try {
+    const r = await fetch(base + "/dhan/oitrend", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ underlying, bucketMin }),
+      signal: AbortSignal.timeout(15000),
+    });
+    return await r.json();
+  } catch (e) { return { ok: false, error: String(e) }; }
+}
+
+// Minute-level premium path for one option leg — the backbone of paper-trade
+// SL/target-touch resolution. Returns {ok, series:[{t,ltp,bid,ask,iv,oi,delta,theta}], high, low, last}.
+export async function fetchPremiumSeries(underlying, strike, type, { expiry = null, sinceTs = null } = {}) {
+  const base = bridgeBaseUrl();
+  if (!base) return { ok: false, error: "no bridge URL" };
+  try {
+    const r = await fetch(base + "/dhan/premium", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ underlying, strike, type, expiry, sinceTs }),
+      signal: AbortSignal.timeout(15000),
+    });
+    return await r.json();
+  } catch (e) { return { ok: false, error: String(e) }; }
+}
+
 // ─── Lot sizes ────────────────────────────────────────────────────────────────
 export function getStoredLots() {
   try { return JSON.parse(localStorage.getItem("alphaedge_lot_sizes") || "{}"); }
