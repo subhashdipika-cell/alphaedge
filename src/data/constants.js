@@ -10,8 +10,8 @@ export const ASSETS = [
   { id: "FINNIFTY",  label: "Fin Nifty",  base: 27200, type: "index", exchange: "NSE" },
 ];
 
-export const PAGES = ["Dashboard","AI Signal","Backtest","Execution","Alerts","History","Money Mgt.","Calendar","MTF Confluence","Journal","Analytics","Options","Settings"];
-export const PAGE_ICONS = ["▣","◈","⟳","⚡","◉","◷","⚑","◫","◐","✎","◑","⊗","⚙"];
+export const PAGES = ["Dashboard","AI Signal","Backtest","Execution","Alerts","History","Money Mgt.","Calendar","MTF Confluence","Journal","Analytics","Options","OI Pulse","Settings"];
+export const PAGE_ICONS = ["▣","◈","⟳","⚡","◉","◷","⚑","◫","◐","✎","◑","⊗","☲","⚙"];
 
 export const CAT_COLOR = { ICT:"#f59e0b", SMC:"#06b6d4", Classic:"#a78bfa", Macro:"#34d399" };
 

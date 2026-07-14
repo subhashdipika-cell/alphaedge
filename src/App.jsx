@@ -30,6 +30,7 @@ import {
   isIndianInstrument, marketSession, evaluateGuardrails,
 } from "./engines/guardrails.js";
 import { detectOptionsRegime, optionsTradePlan } from "./engines/strike.js";
+import OiPulsePage from "./pages/OiPulse.jsx";
 
 // ─── STORAGE HELPERS (30-day persistent signal history) ───────────────────────
 const HISTORY_KEY = "signal-history";
@@ -7411,6 +7412,8 @@ export default function AlphaEdge() {
     <AnalyticsPage key="analytics" candles={candles} prices={prices} history={history}/>,
 
     <OptionsDeskPage key="options"/>,
+
+    <OiPulsePage key="oipulse"/>,
 
     <SettingsPage key="settings"/>,
   ];
