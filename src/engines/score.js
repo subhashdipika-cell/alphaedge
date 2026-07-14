@@ -298,7 +298,7 @@ export function scoreOption(inputs) {
 
   // ── coverage-capped renormalization ──
   const present = Object.values(factors).filter(f => !f.missing);
-  const coverage = present.reduce((s, f) => s + f.weight, 0);   // 0..100
+  const coverage = Math.round(present.reduce((s, f) => s + f.weight, 0));   // 0..100
   const rawPts = present.reduce((s, f) => s + f.points, 0);
   let score = 0, verdict = "NO_TRADE", why = "";
   if (coverage < 70) {

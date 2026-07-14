@@ -6,6 +6,7 @@ import { scoreOption } from "../engines/score.js";
 import { getMoneyMgt } from "../state/settings.js";
 import { getRiskPolicy } from "../state/settings.js";
 import { loadHistory } from "../state/history.js";
+import { estimateCost } from "../engines/resolve.js";
 
 // ─── OPTION SCORE — the 0–100 decision engine, explained ──────────────────────
 
@@ -248,7 +249,7 @@ export default function OptionScorePage({ onPaperTrade }) {
                 </Card>
 
                 <Card title="TRADE PLAN">
-                  {result.plan ? (
+                  {result.plan ? (<>
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
                       <Stat label="Lots" value={result.plan.lots} color={result.plan.affordable ? C.ink : C.red} />
                       <Stat label="Entry" value={`₹${fmt(result.plan.entry)}`} />
@@ -259,7 +260,17 @@ export default function OptionScorePage({ onPaperTrade }) {
                       <Stat label="Outlay" value={`₹${fmt(result.plan.outlayRs, 0)}`} />
                       <Stat label="R:R" value={`1:${result.plan.rr}`} color={C.blue} />
                     </div>
-                  ) : <div style={{ fontSize: 10, color: C.faint }}>No plan — sizing needs a valid premium.</div>}
+                    {(() => {
+                      const cost = estimateCost({ entryPremium: result.plan.entry, exitPremium: result.plan.tgtPrice, lots: result.plan.lots, lotSize: result.plan.lotUnits, underlying });
+                      const netReward = result.plan.rewardRs - cost;
+                      return result.plan.lots > 0 ? (
+                        <div style={{ marginTop: 8, fontSize: 9, color: C.faint, lineHeight: 1.6 }}>
+                          Est. round-trip cost (brokerage + STT + exch + GST + stamp): <b style={{ color: C.amber }}>≈ ₹{fmt(cost, 0)}</b><br/>
+                          Net reward at target: <b style={{ color: netReward >= 0 ? C.green : C.red }}>₹{fmt(netReward, 0)}</b> · costs shrink real edge, paper P&L is netted
+                        </div>
+                      ) : null;
+                    })()}
+                  </>) : <div style={{ fontSize: 10, color: C.faint }}>No plan — sizing needs a valid premium.</div>}
                 </Card>
               </div>
             )}

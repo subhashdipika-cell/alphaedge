@@ -40,6 +40,9 @@ import {
 } from "./state/history.js";
 import OiPulsePage from "./pages/OiPulse.jsx";
 import OptionScorePage from "./pages/OptionScore.jsx";
+import PaperTradesPage from "./pages/PaperTrades.jsx";
+import { isOptionPaperTrade } from "./engines/resolve.js";
+import { resolveOpenPaperTrades } from "./state/paperTrades.js";
 
 function signalRuleContextForPrompt(assetObj, tf, strategyName) {
   const learning = getSignalLearning();
@@ -3970,22 +3973,6 @@ function BacktestPage({candles}) {
 
 // Placeholder until the Paper Trades blotter lands (revamp Phase 7): AlphaEdge
 // is decision-support + paper only — no broker execution.
-function ExecutionPage() {
-  return (
-    <div style={{height:'100%',display:'flex',alignItems:'center',justifyContent:'center'}}>
-      <div style={{background:'#0a1628',border:'0.5px solid #1e3a5a',borderRadius:12,padding:'28px 36px',maxWidth:520,textAlign:'center'}}>
-        <div style={{fontSize:22,marginBottom:10}}>📝</div>
-        <div style={{fontSize:13,color:'#e2e8f0',fontWeight:700,marginBottom:8}}>Paper Trades — coming with the options revamp</div>
-        <div style={{fontSize:11,color:'#94a3b8',lineHeight:1.6}}>
-          AlphaEdge now runs decision-support + paper trading only. The new blotter will track
-          option paper positions (entry premium, SL, target, live P&L) once the Option Score
-          engine lands. Real orders stay manual in your broker app.
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function AlertsPage({ prices={}, history=[] }) {
   // Helper to format an index level
   const fmtPrice = (id, p) => !p ? "—" : `${Math.round(p).toLocaleString("en-IN")} pts`;
@@ -5609,6 +5596,9 @@ async function autoResolveFromPrice() {
   let changed = false;
   const next = cur.map(s => {
     if ((s.outcome || "pending") !== "pending") return s;
+    // Option paper trades resolve against the PREMIUM series, not spot — the
+    // premium resolver (resolveOpenPaperTrades) owns them.
+    if (isOptionPaperTrade(s)) return s;
 
     // Expiry takes PRECEDENCE over price: a signal past its horizon must not
     // be scored against today's quote — price has wandered for days and a
@@ -7112,11 +7102,17 @@ export default function AlphaEdge() {
     loadHistory().then(h=>setHistory(h));
   },[]);
 
-  // App-wide price-based outcome resolver (every 60s) — keeps outcomes and the
-  // cooldown guardrails current on EVERY page, not just when History is open.
+  // App-wide outcome resolver (every 60s) — keeps outcomes and the cooldown
+  // guardrails current on EVERY page. Option paper trades resolve against the
+  // PREMIUM series; legacy spot signals against the index quote.
   useEffect(()=>{
     let alive = true;
     const sync = async () => {
+      try {
+        const cur = await loadHistory();
+        const { changed, next } = await resolveOpenPaperTrades(cur);
+        if (alive && changed && next) { await saveHistory(next); setHistory(next); }
+      } catch { /* premium series offline — retry next tick */ }
       try {
         const { changed, next } = await autoResolveFromPrice();
         if (alive && changed && next) setHistory(next);
@@ -7269,30 +7265,39 @@ export default function AlphaEdge() {
     setHistory(updatedHistory);
   },[]);
 
-  // Log an Option-Score recommendation to history as a paper trade. The full
-  // premium-tracked lifecycle lands in Phase 7; this records the decision now so
-  // the recommendation and its factor breakdown are captured for R&D.
+  // Accept an Option-Score recommendation as a paper trade: snapshot the entry
+  // premium + SL/target on the PREMIUM, and record the plan + full factor
+  // breakdown. The premium-based resolver (state/paperTrades.js) then tracks it
+  // to win/loss/time-stop/square-off against the /dhan/premium series.
   const handlePaperTrade = useCallback(async (result)=>{
-    if (!result || !result.strike) return;
+    if (!result || !result.strike || !result.plan) return;
+    const now = Date.now();
     const record = {
-      id: `SCORE-${Date.now()}`,
-      timestamp: Date.now(),
+      id: `SCORE-${now}`,
+      timestamp: now,
+      entryTs: now,
       asset: ASSETS.find(a=>a.id===result.underlying)?.label || result.underlying,
       assetId: result.underlying,
       timeframe: "options",
-      nature: "Intraday",
+      nature: result.style?.style === "SCALP" ? "Scalping" : result.style?.style === "SWING" ? "Swing" : "Intraday",
       bias: result.direction === "CE" ? "BULLISH" : "BEARISH",
       confidence: result.score,
       setup: `${result.style?.label || "Score"} · ${result.strike.strike}${result.direction} · ${result.regime.label}`,
+      // premium-based fields (the resolver keys on these)
       entry: result.strike.ltp,
       optionPremium: result.strike.ltp,
-      stopLoss: result.plan?.slPrice,
-      takeProfit1: result.plan?.tgtPrice,
-      riskReward: result.plan?.rr,
+      slPremium: result.plan.slPrice,
+      tgtPremium: result.plan.tgtPrice,
+      stopLoss: result.plan.slPrice,
+      takeProfit1: result.plan.tgtPrice,
+      lots: result.plan.lots,
+      lotSize: result.plan.lotUnits,
+      maxHoldMin: result.plan.maxHoldMin,
+      squareOff: result.plan.squareOff !== false,
+      riskReward: result.plan.rr,
       expiry: result.strike.expiry,
       strike: result.strike.strike,
       direction: result.direction,
-      maxHoldMin: result.plan?.maxHoldMin,
       summary: result.report.map(l=>`${l.k}: ${l.v}`).join(" · "),
       scoreFactors: Object.fromEntries(Object.entries(result.factors).map(([k,f])=>[k, f.score01])),
       regime: result.regime.regime,
@@ -7304,7 +7309,7 @@ export default function AlphaEdge() {
     };
     const updated = await appendSignal(record);
     setHistory(updated);
-    setPage(7);   // jump to History so the user sees it logged
+    setPage(3);   // jump to the Paper Trades blotter
   },[]);
 
   const pendingCount = history.filter(s=>s.outcome==="pending").length;
@@ -7320,13 +7325,13 @@ export default function AlphaEdge() {
 
     <OiPulsePage key="oipulse"/>,
 
+    <PaperTradesPage key="paper"/>,
+
     <AISignalPage key="ai"
       onSignalSaved={handleSignalSaved}
       prices={prices}/>,
 
     <BacktestPage key="bt" candles={candles}/>,
-
-    <ExecutionPage key="exec"/>,
 
     <AlertsPage key="alerts" prices={prices} history={history}/>,
 
