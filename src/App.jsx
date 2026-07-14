@@ -12,7 +12,7 @@ import {
   getDhanToken, setDhanToken, getDhanClientId, setDhanClientId,
   getAnyBridgeUrl, getDhanLastError,
   fetchDhanHistorical, fetchDhanChartCandles, fetchBridgePrices, fetchRealPrices,
-  fetchOptionChain,
+  fetchOptionChain, fetchVix,
   getStoredLots, getLotSize, getLotsUpdatedAt, refreshLotSizes,
   getNseHolidayInfo, fetchNseHolidayInfo,
 } from "./data/bridge.js";
@@ -29,8 +29,8 @@ import {
   GUARDRAIL_DEFAULTS, getGuardrails, setGuardrails,
   isIndianInstrument, marketSession, evaluateGuardrails,
 } from "./engines/guardrails.js";
-import { detectOptionsRegime, optionsTradePlan } from "./engines/strike.js";
 import { STYLE_STRIKE, getStrikePref, setStrikePref } from "./engines/style.js";
+import { ECON_EVENTS_FALLBACK, ASSET_IMPACT, getEconEvents, setLiveEconEvents, hasLiveEconEvents } from "./data/events.js";
 import {
   SETTINGS_KEY, loadSettings, persistSettings,
   MONEY_MGT_DEFAULTS, getMoneyMgt, setMoneyMgt, getRiskPolicy,
@@ -1326,10 +1326,10 @@ function AdvancedICTChart({candles: propCandles, asset, price, change}) {
     if(ov.sessions && vis.length>0 && vis[0]?.ts){
       // Define sessions by UTC hour range, label, and fill color (matching screenshot)
       const SESSIONS=[
-        { label:"Asia",     startH:0,  endH:9,  fill:"rgba(245,158,11,0.09)",  border:"rgba(245,158,11,0.5)",  textColor:"#f59e0b" },
-        { label:"NSE",      startH:3.75,endH:10, fill:"rgba(167,139,250,0.07)",border:"rgba(167,139,250,0.45)",textColor:"#a78bfa" },
-        { label:"London",   startH:7,  endH:16, fill:"rgba(34,197,94,0.08)",   border:"rgba(34,197,94,0.5)",   textColor:"#22c55e" },
-        { label:"New York", startH:12, endH:21, fill:"rgba(244,63,94,0.08)",   border:"rgba(244,63,94,0.5)",   textColor:"#f43f5e" },
+        { label:"NSE Open", startH:3.75, endH:4.75, fill:"rgba(244,63,94,0.09)",  border:"rgba(244,63,94,0.5)",   textColor:"#f43f5e" },
+        { label:"Morning",  startH:4.75, endH:6.5,  fill:"rgba(96,165,250,0.07)", border:"rgba(96,165,250,0.45)", textColor:"#60a5fa" },
+        { label:"Midday",   startH:6.5,  endH:8.5,  fill:"rgba(167,139,250,0.07)",border:"rgba(167,139,250,0.45)",textColor:"#a78bfa" },
+        { label:"Afternoon",startH:8.5,  endH:10,   fill:"rgba(34,197,94,0.08)",  border:"rgba(34,197,94,0.5)",   textColor:"#22c55e" },
       ];
 
       // Build a list of session blocks visible in the viewport
@@ -1829,10 +1829,10 @@ function AdvancedICTChart({candles: propCandles, asset, price, change}) {
       <div style={{display:'flex',gap:14,padding:'4px 12px',
         borderTop:'0.5px solid #0d1e35',flexShrink:0,flexWrap:'wrap',alignItems:'center'}}>
         {ov.sessions&&<>
-          <span style={{fontSize:8,color:"#f59e0b",fontFamily:"monospace"}}>▬ Asia</span>
-          <span style={{fontSize:8,color:"#a78bfa",fontFamily:"monospace"}}>▬ NSE</span>
-          <span style={{fontSize:8,color:"#22c55e",fontFamily:"monospace"}}>▬ London</span>
-          <span style={{fontSize:8,color:"#f43f5e",fontFamily:"monospace"}}>▬ New York</span>
+          <span style={{fontSize:8,color:"#f43f5e",fontFamily:"monospace"}}>▬ NSE Open</span>
+          <span style={{fontSize:8,color:"#60a5fa",fontFamily:"monospace"}}>▬ Morning</span>
+          <span style={{fontSize:8,color:"#a78bfa",fontFamily:"monospace"}}>▬ Midday</span>
+          <span style={{fontSize:8,color:"#22c55e",fontFamily:"monospace"}}>▬ Afternoon</span>
         </>}
         {ov.ema&&[{c:'#f59e0b',l:'EMA 20'},{c:'#a78bfa',l:'EMA 50'},{c:'#ef4444',l:'EMA 200'}].map(e=>(
           <span key={e.l} style={{fontSize:8,color:e.c,fontFamily:'monospace'}}>─── {e.l}</span>
@@ -2269,18 +2269,16 @@ function SessionStatusBar() {
   const istNow  = new Date(now.getTime() + 5.5*60*60*1000);
   const istStr  = `${String(istNow.getUTCHours()).padStart(2,"0")}:${String(istNow.getUTCMinutes()).padStart(2,"0")}:${String(istNow.getUTCSeconds()).padStart(2,"0")}`;
 
+  // NSE session micro-windows (UTC hours; IST = UTC+5:30).
   const SESSIONS = [
-    { name:"Sydney",   start:21,   end:6,    color:"#34d399", icon:"🦘", ist:"02:30–11:30" },
-    { name:"Tokyo",    start:0,    end:9,    color:"#60a5fa", icon:"⛩",  ist:"05:30–14:30" },
-    { name:"NSE",      start:3.75, end:10,   color:"#a78bfa", icon:"🇮🇳", ist:"09:15–15:30" },
-    { name:"London",   start:7,    end:16,   color:"#f59e0b", icon:"🎡", ist:"12:30–21:30" },
-    { name:"New York", start:12,   end:21,   color:"#f43f5e", icon:"🗽", ist:"17:30–02:30" },
+    { name:"NSE Open",      start:3.75, end:4.75, color:"#f43f5e", icon:"🔔", ist:"09:15–10:15" },
+    { name:"NSE Morning",   start:4.75, end:6.5,  color:"#60a5fa", icon:"🇮🇳", ist:"10:15–12:00" },
+    { name:"NSE Midday",    start:6.5,  end:8.5,  color:"#a78bfa", icon:"🇮🇳", ist:"12:00–14:00" },
+    { name:"NSE Afternoon", start:8.5,  end:10,   color:"#22c55e", icon:"🎯", ist:"14:00–15:30" },
   ];
   const KILL_ZONES = [
-    { name:"London KZ",  start:7,    end:9.5,  color:"#f59e0b", ist:"12:30–15:00" },
-    { name:"NY Open KZ", start:12,   end:14,   color:"#f43f5e", ist:"17:30–19:30" },
-    { name:"NSE Open KZ",start:3.75, end:5,    color:"#a78bfa", ist:"09:15–10:30" },
-    { name:"Asian KZ",   start:0,    end:2,    color:"#60a5fa", ist:"05:30–07:30" },
+    { name:"Open Volatility", start:3.75, end:4.25, color:"#f43f5e", ist:"09:15–09:45" },
+    { name:"Afternoon Prime", start:8.5,  end:10,   color:"#22c55e", ist:"14:00–15:30" },
   ];
 
   const isActive = (s,e) => s<e ? utcH>=s&&utcH<e : utcH>=s||utcH<e;
@@ -2801,12 +2799,16 @@ function GeoAlertsPanel() {
   );
 }
 
-function DashboardPage({prices, changes, candles, sources={}, activeAsset, setActiveAsset, marketOpen=true, onRefresh, refreshing}) {
+function DashboardPage({prices, changes, candles, sources={}, activeAsset, setActiveAsset, marketOpen=true, onRefresh, refreshing, history=[]}) {
   const asset=ASSETS.find(a=>a.id===activeAsset);
   const price=prices[activeAsset]||asset.base;
   const change=changes[activeAsset]||0;
   const cdata=candles[activeAsset]||[];
   const isNifty=activeAsset==="NIFTY50";
+
+  // Live India VIX for the volatility tile.
+  const [vix,setVix]=useState(null);
+  useEffect(()=>{ let s=false; fetchVix().then(v=>{ if(!s&&v?.vix?.ltp) setVix(v.vix); }); return ()=>{s=true;}; },[]);
 
   const fmtP=(id,p)=>{
     const a=ASSETS.find(x=>x.id===id)||asset;
@@ -2817,25 +2819,10 @@ function DashboardPage({prices, changes, candles, sources={}, activeAsset, setAc
     return `${sym}${p.toFixed(2)}${sfx}`;
   };
 
-  const ASSET_SIGNALS={
-    NIFTY50:[
-      {dir:"BUY",   nature:"Intraday", name:"RBI Rate Hold Bounce", conf:82, strategy:"Macro", entry:25450, sl:25300, tp:25750},
-      {dir:"BUY",   nature:"Intraday", name:"FII Inflow OB",        conf:76, strategy:"ICT",   entry:25480, sl:25320, tp:25820},
-      {dir:"BUY",   nature:"Scalping", name:"NSE Open Kill Zone",   conf:71, strategy:"ICT",   entry:25500, sl:25360, tp:25720},
-      {dir:"SELL",  nature:"Swing",    name:"Budget Risk Hedge",    conf:55, strategy:"Macro", entry:25600, sl:25800, tp:25200},
-    ],
-    BANKNIFTY:[
-      {dir:"BUY",   nature:"Intraday", name:"PSU Bank Momentum OB", conf:78, strategy:"ICT",   entry:57400, sl:57000, tp:58300},
-      {dir:"SELL",  nature:"Scalping", name:"Liquidity Sweep High", conf:66, strategy:"SMC",   entry:57700, sl:58050, tp:57000},
-    ],
-    SENSEX:[
-      {dir:"BUY",   nature:"Intraday", name:"BSE Range Breakout",   conf:73, strategy:"Classic", entry:83400, sl:82950, tp:84300},
-    ],
-    FINNIFTY:[
-      {dir:"BUY",   nature:"Intraday", name:"Financials CHoCH Up",  conf:70, strategy:"SMC",   entry:27150, sl:26980, tp:27500},
-    ],
-  };
-  const signals=ASSET_SIGNALS[activeAsset]||ASSET_SIGNALS.NIFTY50;
+  // Real recommendation history (Option Score paper trades), most recent first.
+  const recs=history.filter(s=>s.source==="Option Score"||s.strike!=null)
+    .sort((a,b)=>b.timestamp-a.timestamp);
+  const signals=recs.filter(s=>s.assetId===activeAsset).slice(0,6);
 
   return (
     <div style={{display:"flex",gap:10,height:"100%",overflow:"hidden"}}>
@@ -2882,11 +2869,18 @@ function DashboardPage({prices, changes, candles, sources={}, activeAsset, setAc
 
         {/* Stats strip */}
         <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:5,flexShrink:0}}>
-          {[
-            {l:"Today P&L", v:"+$1,240", c:"#22c55e"},
-            {l:"Win Rate",  v:"68%",     c:"#e2e8f0"},
-            {l:"Drawdown",  v:"-2.1%",   c:"#ef4444"},
-          ].map(m=>(
+          {(()=>{
+            const done=history.filter(s=>s.outcome==="win"||s.outcome==="loss");
+            const wins=done.filter(s=>s.outcome==="win").length;
+            const wr=done.length?Math.round(wins/done.length*100):null;
+            const net=done.reduce((a,s)=>a+(Number(s.pnlRs)||0),0);
+            const vl=vix?.ltp;
+            return [
+              {l:"Win Rate", v:wr==null?"—":`${wr}%`, c:wr==null?"#94a3b8":wr>=50?"#22c55e":"#ef4444"},
+              {l:"Net P&L",  v:done.length?`${net>=0?"+":""}₹${Math.round(net).toLocaleString("en-IN")}`:"—", c:net>=0?"#22c55e":"#ef4444"},
+              {l:"India VIX", v:vl!=null?vl.toFixed(1):"—", c:vl==null?"#94a3b8":vl>18?"#ef4444":vl<11?"#60a5fa":"#e2e8f0"},
+            ];
+          })().map(m=>(
             <div key={m.l} style={{background:"#0a1628",border:"0.5px solid #1e3a5a",borderRadius:7,padding:"6px 8px"}}>
               <div style={{fontSize:7,color:"#94a3b8",marginBottom:2,letterSpacing:"0.06em"}}>{m.l.toUpperCase()}</div>
               <div style={{fontSize:14,fontWeight:800,color:m.c,fontFamily:"monospace"}}>{m.v}</div>
@@ -2901,34 +2895,40 @@ function DashboardPage({prices, changes, candles, sources={}, activeAsset, setAc
         <div style={{background:"#0a1628",border:"0.5px solid #1e3a5a",borderRadius:10,
           padding:"10px 10px",flex:1,display:"flex",flexDirection:"column",minHeight:0,overflow:"hidden"}}>
           <div style={{fontSize:8,color:"#94a3b8",letterSpacing:"0.1em",marginBottom:8,flexShrink:0}}>
-            ACTIVE SIGNALS — {asset.label}
+            RECENT RECOMMENDATIONS — {asset.label}
           </div>
           <div style={{display:"flex",flexDirection:"column",gap:6,overflowY:"auto",flex:1}}>
+            {signals.length===0 && (
+              <div style={{fontSize:9,color:"#64748b",fontFamily:"monospace",textAlign:"center",padding:"18px 8px",lineHeight:1.6}}>
+                No {asset.label} recommendations yet.<br/>Score a setup on the Option Score page.
+              </div>
+            )}
             {signals.map((s,i)=>{
-              const col=s.dir==="BUY"?"#22c55e":s.dir==="SELL"?"#ef4444":"#64748b";
-              const cc=CAT_COLOR[s.strategy]||"#64748b";
-              const nc=s.nature==="Scalping"?"#f43f5e":s.nature==="Intraday"?"#f59e0b":"#60a5fa";
+              const isCall=s.direction==="CE"||s.bias==="BULLISH";
+              const col=isCall?"#22c55e":"#ef4444";
+              const oc={win:"#22c55e",loss:"#ef4444",expired:"#94a3b8",pending:"#f59e0b"}[s.outcome||"pending"];
+              const nc=s.nature==="Scalping"?"#f43f5e":s.nature==="Swing"?"#60a5fa":"#f59e0b";
               return (
-                <div key={i} style={{background:"#060d17",border:`0.5px solid ${col}20`,
+                <div key={s.id||i} style={{background:"#060d17",border:`0.5px solid ${col}20`,
                   borderLeft:`2px solid ${col}`,borderRadius:6,padding:"7px 9px",flexShrink:0}}>
                   <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:4}}>
                     <span style={{fontSize:7,fontWeight:800,color:nc,background:nc+"18",
                       padding:"1px 5px",borderRadius:3,border:`0.5px solid ${nc}40`}}>
-                      {s.nature==="Scalping"?"⚡ SCALP":s.nature==="Intraday"?"🕐 INTRADAY":"📈 SWING"}
+                      {s.nature==="Scalping"?"⚡ SCALP":s.nature==="Swing"?"📈 SWING":"🕐 INTRADAY"}
                     </span>
+                    <span style={{fontSize:7,color:oc,background:oc+"18",padding:"1px 5px",borderRadius:3,marginLeft:4}}>{(s.outcome||"pending").toUpperCase()}</span>
                     <span style={{fontSize:9,fontWeight:700,color:col,marginLeft:"auto"}}>
-                      {s.dir==="BUY"?"▲":s.dir==="SELL"?"▼":"◆"} {s.dir}
+                      {isCall?"▲":"▼"} {s.strike} {s.direction||(isCall?"CE":"PE")}
                     </span>
                   </div>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
-                    <div style={{fontSize:11,fontWeight:600,color:"#e2e8f0"}}>{s.name}</div>
-                    <div style={{textAlign:"right"}}>
-                      <div style={{fontSize:8,color:cc,background:cc+"18",padding:"1px 4px",borderRadius:3,marginBottom:2}}>{s.strategy}</div>
-                      <div style={{fontSize:14,fontWeight:800,color:col,fontFamily:"monospace"}}>{s.conf}%</div>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                    <div style={{fontSize:9,color:"#7c8ea8",fontFamily:"monospace"}}>
+                      ₹{Number(s.optionPremium||0).toFixed(1)} · {new Date(s.timestamp).toLocaleDateString("en-IN",{day:"2-digit",month:"short"})}
                     </div>
+                    <div style={{fontSize:14,fontWeight:800,color:col,fontFamily:"monospace"}}>{s.confidence}</div>
                   </div>
-                  <div style={{height:3,background:"#1e2a3a",borderRadius:1.5}}>
-                    <div style={{height:3,width:`${s.conf}%`,background:col,borderRadius:1.5}}/>
+                  <div style={{height:3,background:"#1e2a3a",borderRadius:1.5,marginTop:4}}>
+                    <div style={{height:3,width:`${Math.min(100,s.confidence||0)}%`,background:col,borderRadius:1.5}}/>
                   </div>
                 </div>
               );
@@ -4595,44 +4595,6 @@ function RiskCalcPage() {
 }
 
 // ─── ECONOMIC CALENDAR PAGE ───────────────────────────────────────────────────
-// Seed / offline-fallback economic calendar. Shown only until a live fetch
-// succeeds (or if every source is unreachable). Real events come from
-// fetchEconEvents(). NOTE: these dates are fixed and will read as "past" once
-// the real week rolls over — that's expected; live data replaces them on load.
-const ECON_EVENTS_FALLBACK = [
-  {id:1, datetime:"2026-05-16T13:30",title:"US CPI m/m",              currency:"USD",impact:"high",  forecast:"0.3%",  previous:"0.4%",  actual:null},
-  {id:2, datetime:"2026-05-16T14:00",title:"FOMC Meeting Minutes",    currency:"USD",impact:"high",  forecast:"—",     previous:"—",     actual:null},
-  {id:3, datetime:"2026-05-16T09:15",title:"India WPI Inflation",     currency:"INR",impact:"medium",forecast:"2.4%",  previous:"2.1%",  actual:null},
-  {id:4, datetime:"2026-05-17T07:00",title:"UK CPI y/y",              currency:"GBP",impact:"high",  forecast:"3.1%",  previous:"3.2%",  actual:null},
-  {id:5, datetime:"2026-05-17T09:00",title:"ECB Economic Bulletin",   currency:"EUR",impact:"medium",forecast:"—",     previous:"—",     actual:null},
-  {id:6, datetime:"2026-05-17T13:30",title:"US Retail Sales m/m",     currency:"USD",impact:"high",  forecast:"0.4%",  previous:"0.7%",  actual:null},
-  {id:7, datetime:"2026-05-18T02:00",title:"China GDP q/q",           currency:"CNY",impact:"high",  forecast:"1.4%",  previous:"1.5%",  actual:null},
-  {id:8, datetime:"2026-05-18T07:45",title:"ECB Interest Rate",       currency:"EUR",impact:"high",  forecast:"3.15%", previous:"3.4%",  actual:null},
-  {id:9, datetime:"2026-05-19T04:00",title:"RBI Monetary Policy",     currency:"INR",impact:"high",  forecast:"6.25%", previous:"6.50%", actual:null},
-  {id:10,datetime:"2026-05-19T09:15",title:"Nifty 50 Derivatives Expiry",currency:"INR",impact:"high",forecast:"—",   previous:"—",     actual:null},
-  {id:11,datetime:"2026-05-19T13:30",title:"US Initial Jobless Claims",currency:"USD",impact:"medium",forecast:"215K",previous:"212K",  actual:null},
-  {id:12,datetime:"2026-05-20T03:30",title:"India CPI y/y",           currency:"INR",impact:"high",  forecast:"4.2%",  previous:"4.6%",  actual:null},
-  {id:13,datetime:"2026-05-20T09:15",title:"India Industrial Production",currency:"INR",impact:"medium",forecast:"5.1%",previous:"4.8%",actual:null},
-  {id:14,datetime:"2026-05-20T13:30",title:"US Nonfarm Payrolls",     currency:"USD",impact:"high",  forecast:"185K",  previous:"177K",  actual:null},
-  {id:15,datetime:"2026-05-20T13:30",title:"US Unemployment Rate",    currency:"USD",impact:"high",  forecast:"4.0%",  previous:"4.1%",  actual:null},
-  {id:16,datetime:"2026-05-21T09:15",title:"India Trade Balance",     currency:"INR",impact:"medium",forecast:"-$18B", previous:"-$20B", actual:null},
-  {id:17,datetime:"2026-05-21T09:30",title:"Bank of England Speech",  currency:"GBP",impact:"medium",forecast:"—",     previous:"—",     actual:null},
-  {id:18,datetime:"2026-05-22T04:00",title:"India GDP Growth Rate",   currency:"INR",impact:"high",  forecast:"7.2%",  previous:"8.4%",  actual:null},
-];
-
-// US events still move Indian indices (Fed → FII flows), so USD maps to them too.
-const ASSET_IMPACT={
-  USD:["NIFTY50","BANKNIFTY","SENSEX"],
-  INR:["NIFTY50","BANKNIFTY","SENSEX","FINNIFTY"],
-};
-
-// Live economic-calendar cache, populated by fetchEconEvents(). Module scope so
-// the value survives Calendar-page unmount/remount within a session.
-let LIVE_ECON_EVENTS = null;
-function getEconEvents() {
-  return (LIVE_ECON_EVENTS && LIVE_ECON_EVENTS.length) ? LIVE_ECON_EVENTS : ECON_EVENTS_FALLBACK;
-}
-
 // ForexFactory's free weekly calendar export (JSON, no API key) — the current
 // trading week (Sun–Sat), refreshed by the source as actuals print.
 const ECON_CALENDAR_FEEDS = [
@@ -4671,7 +4633,7 @@ async function fetchEconEvents() {
   }
   if (!all.length) return null;
   all.sort((a, b) => new Date(a.datetime) - new Date(b.datetime));
-  LIVE_ECON_EVENTS = all;
+  setLiveEconEvents(all);
   return all;
 }
 
@@ -4680,7 +4642,7 @@ function CalendarPage() {
   const [filterCurrency,setFilterCurrency]=useState("ALL");
   const [selectedId,setSelectedId]=useState(null);
   const [events,setEvents]=useState(()=>getEconEvents());
-  const [live,setLive]=useState(!!LIVE_ECON_EVENTS);
+  const [live,setLive]=useState(hasLiveEconEvents());
   const now=new Date();
 
   // Load the live calendar on mount and re-poll every 15 min (actuals fill in
@@ -6052,267 +6014,6 @@ function HistoryPage({ history, setHistory }) {
 // and cache them. Futures and options share the same lot per index. Defaults
 // below are the last-known values, used until a refresh runs.
 
-function OptionsDeskPage() {
-  const [underlying, setUnderlying] = useState("NIFTY50");
-  const [dir, setDir]   = useState("CALL");
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [err, setErr]   = useState("");
-  const [candles, setCandles] = useState([]);   // underlying candles for regime
-  const [autoDir, setAutoDir] = useState(true);  // let the regime pick CALL/PUT
-
-  const load = useCallback(async () => {
-    setLoading(true); setErr("");
-    const [r, cs] = await Promise.all([
-      fetchOptionChain(underlying, 6),
-      fetchDhanChartCandles(underlying, "15m").catch(() => null),
-    ]);
-    if (r && r.ok) setData(r); else { setData(null); setErr(r?.error || "Option chain unavailable"); }
-    setCandles(Array.isArray(cs) ? cs : []);
-    setLoading(false);
-  }, [underlying]);
-  useEffect(()=>{ load(); }, [load]);
-
-  const g = getGuardrails();
-  const mm = getMoneyMgt();
-  const riskPct = getRiskPolicy().maxRiskPct;
-
-  // Market-regime read → NO_TRADE / BUY_CALL / BUY_PUT (recomputed on new data).
-  const regime = useMemo(
-    () => detectOptionsRegime({ candles, chain: data, guardrails: g }),
-    // g is cheap/stable; depend on the live inputs only
-    [candles, data], // eslint-disable-line react-hooks/exhaustive-deps
-  );
-
-  // Let the regime drive the CALL/PUT view unless the user has toggled manually.
-  useEffect(() => {
-    if (autoDir && regime.suggestion === "BUY_CALL") setDir("CALL");
-    else if (autoDir && regime.suggestion === "BUY_PUT") setDir("PUT");
-  }, [autoDir, regime.suggestion]);
-  const label = { NIFTY50:"Nifty 50", BANKNIFTY:"Bank Nifty", SENSEX:"Sensex" }[underlying] || underlying;
-  const fmt = v => Number.isFinite(Number(v)) ? Number(v).toLocaleString("en-IN",{maximumFractionDigits:2}) : "—";
-
-  let rec = null, legs = [];
-  if (data) {
-    legs = data.strikes.map(s => {
-      const leg = dir==="CALL" ? s.ce : s.pe;
-      return { strike:s.strike, atm:s.atm, ...leg, adelta:Math.abs(leg.delta||0) };
-    });
-    const eligible = legs.filter(l => l.ltp >= g.minPremium && l.adelta >= 0.35);
-    rec = (eligible.length?eligible:legs).slice().sort((a,b)=>Math.abs(a.adelta-0.55)-Math.abs(b.adelta-0.55))[0];
-  }
-  const recFlags = [];
-  if (rec) {
-    if (data.isExpiryToday && g.blockExpiryDay) recFlags.push({c:"#ef4444",t:"🛑 Expiry day (0-DTE) — guardrail blocks this buy"});
-    if (rec.ltp < g.minPremium) recFlags.push({c:"#f59e0b",t:`⚠ Premium ₹${fmt(rec.ltp)} below floor ₹${g.minPremium}`});
-    if (rec.adelta < 0.4) recFlags.push({c:"#f59e0b",t:`⚠ OTM — delta ${rec.adelta.toFixed(2)} needs a big fast move`});
-    if (data.ivPercentile != null && data.ivPercentile > 70) recFlags.push({c:"#f59e0b",t:`⚠ IV high (${data.ivPercentile}th pct) — options expensive to buy`});
-    if (!recFlags.length) recFlags.push({c:"#22c55e",t:"✓ ATM/ITM with adequate premium — sound buy zone"});
-  }
-  const dirColor = dir==="CALL" ? "#22c55e" : "#ef4444";
-  const plan = optionsTradePlan({ rec, underlying, mm, riskPct });
-  const noTrade = regime.suggestion === "NO_TRADE";
-  const sugColor = noTrade ? "#f59e0b" : regime.suggestion === "BUY_CALL" ? "#22c55e" : "#ef4444";
-  const sugText  = noTrade ? "NO TRADE" : regime.suggestion === "BUY_CALL" ? "BUY CALLS" : "BUY PUTS";
-
-  return (
-    <div style={{height:"100%",overflow:"auto"}}>
-      <div style={{maxWidth:1100,margin:"0 auto",display:"flex",flexDirection:"column",gap:10}}>
-
-        {/* Controls */}
-        <div style={{background:"#0a1628",border:"0.5px solid #1e3a5a",borderRadius:12,padding:"12px 16px",display:"flex",gap:14,alignItems:"center",flexWrap:"wrap"}}>
-          <div style={{fontSize:10,color:"#94a3b8",letterSpacing:"0.12em",fontWeight:700}}>OPTIONS DESK</div>
-          <div style={{display:"flex",gap:4}}>
-            {["NIFTY50","BANKNIFTY","SENSEX"].map(u=>(
-              <span key={u} onClick={()=>setUnderlying(u)} style={{fontSize:10,padding:"4px 10px",borderRadius:6,cursor:"pointer",fontFamily:"monospace",
-                background:underlying===u?"#1e3a5a":"#060d17",color:underlying===u?"#60a5fa":"#94a3b8",border:`0.5px solid ${underlying===u?"#3b82f6":"#1e3a5a"}`}}>
-                {u==="NIFTY50"?"Nifty":u==="BANKNIFTY"?"BankNifty":"Sensex"}
-              </span>
-            ))}
-          </div>
-          <div style={{display:"flex",gap:4,marginLeft:6}}>
-            {["CALL","PUT"].map(d=>(
-              <span key={d} onClick={()=>setDir(d)} style={{fontSize:10,padding:"4px 14px",borderRadius:6,cursor:"pointer",fontFamily:"monospace",fontWeight:700,
-                background:dir===d?(d==="CALL"?"#052e16":"#1a0000"):"#060d17",color:dir===d?(d==="CALL"?"#22c55e":"#ef4444"):"#94a3b8",
-                border:`0.5px solid ${dir===d?(d==="CALL"?"#22c55e":"#ef4444"):"#1e3a5a"}`}}>
-                BUY {d}
-              </span>
-            ))}
-          </div>
-          {data && (
-            <div style={{display:"flex",alignItems:"center",gap:8,marginLeft:"auto"}}>
-              <span style={{fontSize:11,color:"#e2e8f0",fontFamily:"monospace"}}>{label} <b>{fmt(data.under_ltp)}</b></span>
-              <span style={{fontSize:9,color:"#7c8ea8"}}>exp {data.expiry}</span>
-              <span style={{fontSize:8,fontWeight:700,padding:"2px 7px",borderRadius:4,fontFamily:"monospace",
-                background:data.stale?"#1c1300":"#052e16",color:data.stale?"#f59e0b":"#22c55e",border:`0.5px solid ${data.stale?"#f59e0b40":"#22c55e40"}`}}>
-                {data.stale?`◷ ${String(data.snapshotTime||"").slice(5,16)} (closed)`:"● LIVE"}
-              </span>
-            </div>
-          )}
-          <button onClick={load} disabled={loading} style={{fontSize:10,padding:"5px 12px",background:"#111e30",border:"0.5px solid #1e3a5a",borderRadius:6,color:"#60a5fa",cursor:"pointer",fontFamily:"monospace"}}>
-            {loading?"◌":"⟳"} Refresh
-          </button>
-        </div>
-
-        {/* ── MARKET REGIME FILTER — buy calls / buy puts / stand aside ── */}
-        {data && (
-          <div style={{background:"#0a1628",border:`0.5px solid ${sugColor}55`,borderRadius:12,padding:"14px 16px"}}>
-            <div style={{display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
-              <div style={{fontSize:9,color:"#94a3b8",letterSpacing:"0.12em",fontWeight:700}}>MARKET REGIME</div>
-              <span style={{fontSize:15,fontWeight:900,letterSpacing:"0.04em",color:sugColor,
-                background:sugColor+"18",border:`0.5px solid ${sugColor}55`,borderRadius:8,padding:"4px 14px",fontFamily:"monospace"}}>
-                {noTrade?"⛔ ":regime.suggestion==="BUY_CALL"?"▲ ":"▼ "}{sugText}
-              </span>
-              <span style={{fontSize:11,color:"#e2e8f0",fontWeight:700}}>{regime.label}</span>
-              <label style={{marginLeft:"auto",fontSize:10,color:"#7c8ea8",display:"flex",alignItems:"center",gap:5,cursor:"pointer"}}>
-                <input type="checkbox" checked={autoDir} onChange={e=>setAutoDir(e.target.checked)}/>
-                Auto-follow regime
-              </label>
-            </div>
-            <div style={{marginTop:10,display:"flex",flexWrap:"wrap",gap:"4px 18px"}}>
-              {regime.reasons.map((t,i)=>(
-                <div key={i} style={{fontSize:10,color:"#94a3b8",lineHeight:1.5,minWidth:220}}>• {t}</div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {err && !data && (
-          <div style={{background:"#0a1628",border:"0.5px dashed #f59e0b40",borderRadius:12,padding:36,textAlign:"center"}}>
-            <div style={{fontSize:13,color:"#f59e0b"}}>{err}</div>
-            <div style={{fontSize:10,color:"#7c8ea8",marginTop:6}}>Live chain needs the bridge running + market hours; off-hours it uses the last collected snapshot (collect with dhan_options_collector.py).</div>
-          </div>
-        )}
-
-        {data && (
-          <div style={{display:"grid",gridTemplateColumns:"1.1fr 2fr",gap:10}}>
-            {/* Recommendation + IV */}
-            <div style={{display:"flex",flexDirection:"column",gap:10}}>
-              <div style={{background:"#0a1628",border:`0.5px solid ${dirColor}50`,borderRadius:12,padding:14}}>
-                <div style={{fontSize:9,color:"#94a3b8",letterSpacing:"0.1em",marginBottom:8}}>RECOMMENDED STRIKE TO BUY</div>
-                {rec ? (<>
-                  <div style={{display:"flex",alignItems:"baseline",gap:8}}>
-                    <span style={{fontSize:26,fontWeight:900,color:dirColor,fontFamily:"monospace"}}>{rec.strike}</span>
-                    <span style={{fontSize:13,fontWeight:700,color:dirColor}}>{dir}</span>
-                    <span style={{marginLeft:"auto",fontSize:18,fontWeight:800,color:"#e2e8f0",fontFamily:"monospace"}}>₹{fmt(rec.ltp)}</span>
-                  </div>
-                  <div style={{display:"flex",gap:14,marginTop:8,flexWrap:"wrap"}}>
-                    <span style={{fontSize:10,color:"#94a3b8"}}>Delta <b style={{color:"#60a5fa"}}>{rec.delta}</b></span>
-                    <span style={{fontSize:10,color:"#94a3b8"}}>IV <b style={{color:"#a78bfa"}}>{rec.iv}%</b></span>
-                    <span style={{fontSize:10,color:"#94a3b8"}}>Theta <b style={{color:"#ef4444"}}>{rec.theta}</b></span>
-                    <span style={{fontSize:10,color:"#94a3b8"}}>OI <b style={{color:"#e2e8f0"}}>{fmt(rec.oi)}</b></span>
-                  </div>
-                  <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:4}}>
-                    {recFlags.map((f,i)=><div key={i} style={{fontSize:10,color:f.c,lineHeight:1.4}}>{f.t}</div>)}
-                  </div>
-                </>) : <div style={{fontSize:11,color:"#7c8ea8"}}>No eligible strike.</div>}
-              </div>
-
-              {/* Trade plan — sized from Money Mgt (capital, RR, SL) + risk policy */}
-              <div style={{background:"#0a1628",border:`0.5px solid ${noTrade?"#f59e0b40":sugColor+"50"}`,borderRadius:12,padding:14}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                  <span style={{fontSize:9,color:"#94a3b8",letterSpacing:"0.1em"}}>TRADE PLAN · from Money Mgt</span>
-                  <span style={{fontSize:8,color:"#7c8ea8",fontFamily:"monospace"}}>cap ₹{fmt(mm.capital)} · risk {riskPct}%</span>
-                </div>
-                {noTrade ? (
-                  <div style={{fontSize:11,color:"#f59e0b",lineHeight:1.5}}>
-                    ⛔ Regime says stand aside — {regime.why} No position sized.
-                  </div>
-                ) : !plan ? (
-                  <div style={{fontSize:11,color:"#7c8ea8"}}>No eligible strike to size.</div>
-                ) : (<>
-                  <div style={{display:"flex",alignItems:"baseline",gap:8,marginBottom:8}}>
-                    <span style={{fontSize:18,fontWeight:900,color:sugColor,fontFamily:"monospace"}}>{rec.strike} {dir}</span>
-                    <span style={{marginLeft:"auto",fontSize:13,fontWeight:800,color:plan.affordable?"#e2e8f0":"#f59e0b",fontFamily:"monospace"}}>
-                      {plan.lots} lot{plan.lots===1?"":"s"} × {plan.lotUnits}
-                    </span>
-                  </div>
-                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
-                    {[
-                      {l:"ENTRY", v:`₹${fmt(plan.entry)}`, c:"#e2e8f0"},
-                      {l:`SL (−${fmt(plan.slPts)})`, v:`₹${fmt(plan.slPrice)}`, c:"#ef4444"},
-                      {l:`TGT (1:${plan.rr})`, v:`₹${fmt(plan.tgtPrice)}`, c:"#22c55e"},
-                    ].map(m=>(
-                      <div key={m.l} style={{background:"#060d17",borderRadius:7,padding:"7px 9px"}}>
-                        <div style={{fontSize:7,color:"#7c8ea8",letterSpacing:"0.05em",marginBottom:2}}>{m.l}</div>
-                        <div style={{fontSize:13,fontWeight:800,color:m.c,fontFamily:"monospace"}}>{m.v}</div>
-                      </div>
-                    ))}
-                  </div>
-                  <div style={{display:"flex",flexWrap:"wrap",gap:"3px 14px",marginTop:9}}>
-                    <span style={{fontSize:10,color:"#94a3b8"}}>Risk <b style={{color:"#ef4444"}}>₹{fmt(plan.riskRs)}</b></span>
-                    <span style={{fontSize:10,color:"#94a3b8"}}>Reward <b style={{color:"#22c55e"}}>₹{fmt(plan.rewardRs)}</b></span>
-                    <span style={{fontSize:10,color:"#94a3b8"}}>Outlay <b style={{color:"#e2e8f0"}}>₹{fmt(plan.outlayRs)}</b></span>
-                  </div>
-                  {!plan.affordable && (
-                    <div style={{marginTop:8,fontSize:9,color:"#f59e0b",lineHeight:1.4}}>
-                      ⚠ 1 lot risks ₹{fmt(plan.oneLotRisk)} &gt; your ₹{fmt(plan.budget)} risk budget ({riskPct}% of ₹{fmt(plan.capital)}). Widen SL, add capital, or skip.
-                    </div>
-                  )}
-                  <div style={{marginTop:8,fontSize:8,color:"#7c8ea8",lineHeight:1.4}}>
-                    Sized so max loss ≈ risk budget. SL {mm.useSL?`fixed ${fmt(mm.slPts||mm.slPoints)} pts`:"= 30% of premium"} · RR from Money Mgt. Lot {plan.lotUnits}/unit (verify current exchange lot).
-                  </div>
-                </>)}
-              </div>
-
-              {/* IV gauge */}
-              <div style={{background:"#0a1628",border:"0.5px solid #1e3a5a",borderRadius:12,padding:14}}>
-                <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
-                  <span style={{fontSize:9,color:"#94a3b8",letterSpacing:"0.1em"}}>ATM IV PERCENTILE</span>
-                  <span style={{fontSize:11,fontWeight:800,fontFamily:"monospace",color:data.ivPercentile==null?"#64748b":data.ivPercentile>70?"#ef4444":data.ivPercentile<30?"#22c55e":"#f59e0b"}}>
-                    {data.ivPercentile==null?"accruing":`${data.ivPercentile}th`}
-                  </span>
-                </div>
-                <div style={{height:8,background:"#060d17",borderRadius:4,overflow:"hidden"}}>
-                  <div style={{height:8,width:`${data.ivPercentile||0}%`,background:data.ivPercentile>70?"#ef4444":data.ivPercentile<30?"#22c55e":"#f59e0b",transition:"width .4s"}}/>
-                </div>
-                <div style={{fontSize:9,color:"#7c8ea8",marginTop:6,lineHeight:1.4}}>
-                  {data.ivPercentile==null?"Building from collected snapshots." : data.ivPercentile>70?"IV rich — buying premium is expensive; favour spreads or wait." : data.ivPercentile<30?"IV cheap — better conditions for buying options." : "IV mid-range."}
-                </div>
-              </div>
-            </div>
-
-            {/* Strike ladder */}
-            <div style={{background:"#0a1628",border:"0.5px solid #1e3a5a",borderRadius:12,overflow:"hidden"}}>
-              <div style={{overflowX:"auto"}}>
-                <table style={{width:"100%",borderCollapse:"collapse",minWidth:560}}>
-                  <thead><tr style={{background:"#07111f"}}>
-                    {["CE Δ","CE IV","CE OI","CE LTP","STRIKE","PE LTP","PE OI","PE IV","PE Δ"].map(h=>(
-                      <th key={h} style={{padding:"7px 8px",fontSize:8,color:"#94a3b8",letterSpacing:"0.05em",borderBottom:"0.5px solid #1e3a5a",whiteSpace:"nowrap",textAlign:h==="STRIKE"?"center":"right"}}>{h}</th>
-                    ))}
-                  </tr></thead>
-                  <tbody>
-                    {data.strikes.map(s=>{
-                      const isRec = rec && s.strike===rec.strike;
-                      const cellCE = dir==="CALL";
-                      return (
-                        <tr key={s.strike} style={{borderBottom:"0.5px solid #102033",background:s.atm?"#0d1b2d":isRec?(dirColor+"14"):"transparent"}}>
-                          <td style={{padding:"6px 8px",fontSize:10,textAlign:"right",fontFamily:"monospace",color:cellCE?"#60a5fa":"#5b6b82"}}>{s.ce.delta}</td>
-                          <td style={{padding:"6px 8px",fontSize:9,textAlign:"right",fontFamily:"monospace",color:"#7c8ea8"}}>{s.ce.iv}</td>
-                          <td style={{padding:"6px 8px",fontSize:9,textAlign:"right",fontFamily:"monospace",color:"#5b6b82"}}>{(s.ce.oi/1000).toFixed(0)}k</td>
-                          <td style={{padding:"6px 8px",fontSize:10,textAlign:"right",fontFamily:"monospace",color:cellCE?"#22c55e":"#7c8ea8",fontWeight:cellCE?700:400}}>{fmt(s.ce.ltp)}</td>
-                          <td style={{padding:"6px 8px",fontSize:11,textAlign:"center",fontFamily:"monospace",fontWeight:800,color:s.atm?"#f59e0b":"#e2e8f0"}}>{s.strike}{s.atm?" ◆":""}</td>
-                          <td style={{padding:"6px 8px",fontSize:10,textAlign:"right",fontFamily:"monospace",color:!cellCE?"#ef4444":"#7c8ea8",fontWeight:!cellCE?700:400}}>{fmt(s.pe.ltp)}</td>
-                          <td style={{padding:"6px 8px",fontSize:9,textAlign:"right",fontFamily:"monospace",color:"#5b6b82"}}>{(s.pe.oi/1000).toFixed(0)}k</td>
-                          <td style={{padding:"6px 8px",fontSize:9,textAlign:"right",fontFamily:"monospace",color:"#7c8ea8"}}>{s.pe.iv}</td>
-                          <td style={{padding:"6px 8px",fontSize:10,textAlign:"right",fontFamily:"monospace",color:!cellCE?"#60a5fa":"#5b6b82"}}>{s.pe.delta}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-              <div style={{padding:"7px 10px",fontSize:8,color:"#64748b",borderTop:"0.5px solid #1e3a5a"}}>
-                ◆ = ATM · highlighted row = recommended {dir} · Δ≈0.5 is ATM, lower Δ = further OTM (cheaper but lottery). Guardrails: ≥₹{g.minPremium} premium, no 0-DTE.
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
 // ─── MTF CONFLUENCE PAGE ─────────────────────────────────────────────────────
 const MTF_TFS = ["1m","5m","15m","1H","4H","1D","1W"];
 const ICT_CONCEPTS = ["Order Block","FVG","BOS","CHoCH","Liquidity Sweep","EMA Alignment","Kill Zone","PD Array","Inducement","MSS"];
@@ -7367,7 +7068,7 @@ export default function AlphaEdge() {
     <DashboardPage key="dash"
       prices={prices} changes={changes} candles={candles} sources={sources}
       activeAsset={activeAsset} setActiveAsset={setActiveAsset}
-      marketOpen={marketOpen} onRefresh={refreshNow} refreshing={refreshing}/>,
+      marketOpen={marketOpen} onRefresh={refreshNow} refreshing={refreshing} history={history}/>,
 
     <OptionScorePage key="score" onPaperTrade={handlePaperTrade}/>,
 
@@ -7395,8 +7096,6 @@ export default function AlphaEdge() {
     <MTFConfluencePage key="mtf" candles={candles} prices={prices}/>,
 
     <JournalPage key="journal"/>,
-
-    <OptionsDeskPage key="options"/>,
 
     <SettingsPage key="settings"/>,
   ];

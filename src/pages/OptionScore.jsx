@@ -7,6 +7,7 @@ import { getMoneyMgt } from "../state/settings.js";
 import { getRiskPolicy } from "../state/settings.js";
 import { loadHistory } from "../state/history.js";
 import { estimateCost } from "../engines/resolve.js";
+import { eventProximity } from "../data/events.js";
 
 // ─── OPTION SCORE — the 0–100 decision engine, explained ──────────────────────
 
@@ -46,16 +47,18 @@ export default function OptionScorePage({ onPaperTrade }) {
   const [err, setErr] = useState("");
   const [expanded, setExpanded] = useState(null);
   const [styleOverride, setStyleOverride] = useState(null);  // null = auto-select
+  const [expiryOverride, setExpiryOverride] = useState(null); // null = nearest
 
   useEffect(() => { loadHistory().then(setHistory); }, []);
+  useEffect(() => { setExpiryOverride(null); }, [underlying]);  // reset expiry when switching index
 
   const load = useCallback(async () => {
     setLoading(true); setErr("");
-    const inputs = await fetchScoreInputs(underlying, 8);
+    const inputs = await fetchScoreInputs(underlying, 8, expiryOverride);
     if (!inputs.chain?.ok && !inputs.chain?.strikes?.length) setErr(inputs.chain?.error || "Option chain unavailable — is the bridge running?");
     setRaw(inputs);
     setLoading(false);
-  }, [underlying]);
+  }, [underlying, expiryOverride]);
 
   useEffect(() => {
     load();
@@ -70,7 +73,7 @@ export default function OptionScorePage({ onPaperTrade }) {
       underlying,
       candles5m: raw.candles5m, candles15m: raw.candles15m, candles1H: raw.candles1H,
       chain: raw.chain, oi, vix: raw.vix, style: styleOverride,
-      history, events: {}, mm: getMoneyMgt(), riskPct: getRiskPolicy().maxRiskPct,
+      history, events: eventProximity(underlying), mm: getMoneyMgt(), riskPct: getRiskPolicy().maxRiskPct,
     });
   }, [raw, history, underlying, styleOverride]);
 
@@ -102,6 +105,16 @@ export default function OptionScorePage({ onPaperTrade }) {
                 {a.label}
               </span>
             ))}
+            {/* Expiry selector — swing buyers should pick a further-dated expiry */}
+            {raw?.chain?.expiries?.length > 1 && (
+              <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                <span style={{ fontSize: 8, color: C.faint, letterSpacing: "0.06em" }}>EXPIRY</span>
+                <select value={expiryOverride || raw.chain.expiry || ""} onChange={e => setExpiryOverride(e.target.value)}
+                  style={{ fontSize: 9, background: C.bg, color: C.blue, border: `0.5px solid ${C.edge}`, borderRadius: 5, padding: "3px 6px", fontFamily: "monospace" }}>
+                  {raw.chain.expiries.slice(0, 8).map((e, i) => <option key={e} value={e}>{e.slice(5)}{i === 0 ? " (near)" : ""}</option>)}
+                </select>
+              </div>
+            )}
             {/* Style selector — Auto lets the engine pick from the regime */}
             <div style={{ marginLeft: "auto", display: "flex", gap: 4, alignItems: "center" }}>
               <span style={{ fontSize: 8, color: C.faint, letterSpacing: "0.06em" }}>STYLE</span>

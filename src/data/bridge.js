@@ -211,13 +211,13 @@ export async function fetchRealPrices() {
 // Live option chain (ATM±range, greeks/IV) via the bridge. Falls back to the
 // last collected snapshot off-hours (the bridge handles that). Returns the
 // bridge response or {ok:false,error}.
-export async function fetchOptionChain(underlying, range = 6) {
+export async function fetchOptionChain(underlying, range = 6, expiry = null) {
   const base = bridgeBaseUrl();
   if (!base) return { ok:false, error:"Start the local bridge — Dhan calls route through it." };
   try {
     const r = await fetch(base + "/dhan/optionchain", {
       method:"POST", headers:{ "Content-Type":"application/json" },
-      body: JSON.stringify({ underlying, range, token:getDhanToken(), clientId:getDhanClientId() }),
+      body: JSON.stringify({ underlying, range, expiry, token:getDhanToken(), clientId:getDhanClientId() }),
       signal: AbortSignal.timeout(20000),
     });
     return await r.json();
@@ -294,9 +294,9 @@ async function scoreCandles(underlying, tf, days) {
 // One-shot pull of everything the Option Buying Score engine needs for one
 // underlying: option chain, OI trend, VIX, and 5m/15m/1H candles. Returns
 // { chain, oiTrend, vix, candles5m, candles15m, candles1H } (candles in app shape).
-export async function fetchScoreInputs(underlying, range = 8) {
+export async function fetchScoreInputs(underlying, range = 8, expiry = null) {
   const [chain, oiTrend, vix, candles5m, candles15m, candles1H] = await Promise.all([
-    fetchOptionChain(underlying, range),
+    fetchOptionChain(underlying, range, expiry),
     fetchOiTrend(underlying, 5),
     fetchVix(),
     scoreCandles(underlying, "5m", 5),
