@@ -24,4 +24,8 @@ export default defineConfig({
       },
     },
   },
+  // Engine unit tests only — never crawl the vendored build_assets snapshot.
+  test: {
+    include: ['src/**/*.{test,spec}.{js,jsx}'],
+  },
 });
