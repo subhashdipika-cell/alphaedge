@@ -1,19 +1,20 @@
 {
   "name": "alphaedge",
-  "version": "3.0.0",
-  "description": "AlphaEdge — AI-powered ICT/SMC trading platform with live charts, signals, backtesting, and risk tools.",
+  "version": "4.0.0",
+  "description": "AlphaEdge — Indian index-options buying decision-support: Trending-OI intelligence, a 0-100 Option Buying Score, trade-style engine, premium-tracked paper trading, and a self-learning R&D loop.",
   "private": true,
   "type": "module",
   "license": "MIT",
   "author": "Subhash",
   "keywords": [
+    "options",
     "trading",
-    "ict",
-    "smc",
+    "nifty",
+    "banknifty",
+    "dhan",
+    "open-interest",
     "react",
-    "vite",
-    "tradingview",
-    "backtesting"
+    "vite"
   ],
   "engines": {
     "node": ">=18"
