@@ -68,6 +68,65 @@ export function detectOptionsRegime({ candles, chain, guardrails }) {
   return { suggestion, label, why, trend, volState, ivp, pcr, skew, strength, reasons };
 }
 
+// Expected move (≈1 SD by expiry) from the ATM straddle price, with an IV-based
+// fallback. chain: /dhan/optionchain result (rows carry ce/pe ltp + iv).
+export function expectedMove(chain, dteYears = null) {
+  if (!chain?.strikes?.length) return null;
+  const spot = chain.under_ltp || 0;
+  const atm = chain.strikes.find(s => s.atm) || chain.strikes[Math.floor(chain.strikes.length / 2)];
+  const straddle = (atm?.ce?.ltp || 0) + (atm?.pe?.ltp || 0);
+  if (straddle > 0) {
+    // The ATM straddle prices the ~1 SD move to expiry (0.8× is a common day-move proxy).
+    return { points: +(straddle * 0.85).toFixed(1), pct: spot ? +((straddle * 0.85 / spot) * 100).toFixed(2) : 0, source: "straddle" };
+  }
+  const iv = (atm?.ce?.iv || atm?.pe?.iv || 0) / 100;
+  const t = dteYears ?? (1 / 365);
+  if (spot && iv > 0) {
+    const pts = spot * iv * Math.sqrt(t);
+    return { points: +pts.toFixed(1), pct: +((pts / spot) * 100).toFixed(2), source: "iv" };
+  }
+  return null;
+}
+
+// Dynamic strike selection for a direction. Prefers |delta| in [0.45,0.65]
+// (ATM / slightly-ITM), ranks by closeness to 0.55, then tight spread, then OI;
+// rejects premium below the floor. Returns { leg, moneyness, reasons } or null.
+export function selectStrike({ chain, direction, minPremium = 40, expected = null }) {
+  if (!chain?.strikes?.length) return null;
+  const side = direction === "CE" ? "ce" : "pe";
+  const spot = chain.under_ltp || 0;
+  const legs = chain.strikes.map(s => {
+    const leg = s[side] || {};
+    const adelta = Math.abs(leg.delta || 0);
+    const spreadPct = leg.ltp > 0 && leg.ask ? Math.abs((leg.ask - (leg.bid || leg.ask)) / leg.ltp) : 0;
+    return { strike: s.strike, atm: s.atm, ltp: leg.ltp || 0, oi: leg.oi || 0, iv: leg.iv || 0,
+             delta: leg.delta || 0, theta: leg.theta || 0, adelta, spreadPct };
+  });
+  const eligible = legs.filter(l => l.ltp >= minPremium && l.adelta >= 0.45 && l.adelta <= 0.65);
+  const pool = eligible.length ? eligible : legs.filter(l => l.ltp >= minPremium);
+  if (!pool.length) return null;
+  pool.sort((a, b) =>
+    Math.abs(a.adelta - 0.55) - Math.abs(b.adelta - 0.55) ||
+    a.spreadPct - b.spreadPct ||
+    b.oi - a.oi);
+  const leg = pool[0];
+
+  // Moneyness relative to spot (CE ITM below spot; PE ITM above spot).
+  let moneyness = "ATM";
+  if (spot) {
+    const diff = leg.strike - spot;
+    const near = Math.abs(diff) <= (expected?.points || spot * 0.001);
+    if (near) moneyness = "ATM";
+    else if (direction === "CE") moneyness = diff < 0 ? "ITM" : "OTM";
+    else moneyness = diff > 0 ? "ITM" : "OTM";
+  }
+  const reasons = [];
+  reasons.push(`Delta ${leg.delta.toFixed(2)} (${moneyness}) — ${leg.adelta >= 0.45 && leg.adelta <= 0.65 ? "in the 0.45–0.65 sweet band" : "closest available to 0.55"}`);
+  if (leg.spreadPct) reasons.push(`Spread ${(leg.spreadPct * 100).toFixed(1)}% of premium`);
+  reasons.push(`Premium ₹${leg.ltp} · OI ${leg.oi.toLocaleString("en-IN")}`);
+  return { leg, moneyness, reasons };
+}
+
 // Position plan for a chosen option leg, sized from Money Mgt (capital + RR + SL)
 // and the risk policy (max % account risk per trade).
 export function optionsTradePlan({ rec, underlying, mm, riskPct }) {

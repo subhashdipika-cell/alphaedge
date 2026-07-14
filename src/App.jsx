@@ -30,27 +30,16 @@ import {
   isIndianInstrument, marketSession, evaluateGuardrails,
 } from "./engines/guardrails.js";
 import { detectOptionsRegime, optionsTradePlan } from "./engines/strike.js";
+import {
+  SETTINGS_KEY, loadSettings, persistSettings,
+  MONEY_MGT_DEFAULTS, getMoneyMgt, setMoneyMgt, getRiskPolicy,
+} from "./state/settings.js";
+import {
+  HISTORY_KEY, THIRTY_DAYS, loadHistory, saveHistory,
+  loadTradeArchive, appendSignal, updateOutcome,
+} from "./state/history.js";
 import OiPulsePage from "./pages/OiPulse.jsx";
-
-// ─── STORAGE HELPERS (30-day persistent signal history) ───────────────────────
-const HISTORY_KEY = "signal-history";
-const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
-
-function getRiskPolicy() {
-  let configuredRiskPct = 1;
-  let configuredDailyPct = 3;
-  try {
-    const settings = loadSettings?.() || {};
-    configuredRiskPct = Number(settings.risk?.maxRiskPct || 1) || 1;
-    configuredDailyPct = Number(settings.risk?.maxDailyLoss || 3) || 3;
-  } catch {}
-  return {
-    minRR: MIN_BIG_PROFIT_RR,
-    maxRiskPct: Math.min(configuredRiskPct, MAX_SIGNAL_RISK_PCT),
-    configuredRiskPct,
-    maxDailyLossPct: configuredDailyPct,
-  };
-}
+import OptionScorePage from "./pages/OptionScore.jsx";
 
 function signalRuleContextForPrompt(assetObj, tf, strategyName) {
   const learning = getSignalLearning();
@@ -182,68 +171,6 @@ function enforceSignalRules(parsed, { assetObj, livePrice, source = "AI" }) {
   };
 }
 
-async function loadHistory() {
-  try {
-    const raw = localStorage.getItem(HISTORY_KEY);
-    if (!raw) return [];
-    const arr = JSON.parse(raw);
-    const cutoff = Date.now() - THIRTY_DAYS;
-    const filtered = arr.filter(s => s.timestamp > cutoff);
-    saveSignalLearning(filtered);
-    return filtered;
-  } catch { return []; }
-}
-
-async function saveHistory(records) {
-  try {
-    const cutoff = Date.now() - THIRTY_DAYS;
-    const pruned = records.filter(s => s.timestamp > cutoff);
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(pruned));
-    saveSignalLearning(pruned);
-    archiveTrades(records);   // durable copy for the monthly Obsidian export
-    return pruned;
-  } catch { return records; }
-}
-
-// ─── DURABLE TRADE ARCHIVE (for monthly Obsidian export) ──────────────────────
-// The live history above is pruned to 30 days, which would drop early-month
-// trades before a month-end rollup can capture them. This archive is fed from
-// the same saveHistory choke point, upserts by id (so later outcome updates win),
-// and is kept ~400 days so a full month is always available to export.
-const TRADE_ARCHIVE_KEY = "alphaedge_trade_archive";
-const ARCHIVE_RETENTION = 400 * 24 * 60 * 60 * 1000;
-
-function archiveTrades(records) {
-  try {
-    const raw  = localStorage.getItem(TRADE_ARCHIVE_KEY);
-    const byId = new Map((raw ? JSON.parse(raw) : []).map(r => [r.id, r]));
-    (records || []).forEach(r => { if (r && r.id) byId.set(r.id, { ...byId.get(r.id), ...r }); });
-    const cutoff = Date.now() - ARCHIVE_RETENTION;
-    const merged = [...byId.values()].filter(r => (r.timestamp || 0) > cutoff);
-    localStorage.setItem(TRADE_ARCHIVE_KEY, JSON.stringify(merged));
-  } catch { /* archive is best-effort — never break a normal save */ }
-}
-
-function loadTradeArchive() {
-  try { const raw = localStorage.getItem(TRADE_ARCHIVE_KEY); return raw ? JSON.parse(raw) : []; }
-  catch { return []; }
-}
-
-async function appendSignal(signal) {
-  const existing = await loadHistory();
-  const updated = [signal, ...existing];
-  return saveHistory(updated);
-}
-
-async function updateOutcome(id, outcome) {
-  const existing = await loadHistory();
-  const updated = existing.map(s => s.id === id ? { ...s, outcome } : s);
-  const saved = saveHistory(updated);
-  // Re-train the learning profile every time an outcome is marked — this is how
-  // the AI's intelligence grows from real results over time.
-  try { saveSignalLearning(updated); } catch { /* ignore */ }
-  return saved;
-}
 
 // ─── MONTHLY OBSIDIAN EXPORT ──────────────────────────────────────────────────
 // At the end of each month the completed month's trades are rolled up into one
@@ -2525,23 +2452,6 @@ function removeActiveStrategy(id, assetId) {
 }
 function isStrategyActive(id, assetId) {
   return getActiveStrategies().some(s => s.id === id && s.assetId === assetId);
-}
-
-// ─── MONEY MANAGEMENT ─────────────────────────────────────────────────────────
-// User's position-sizing & risk rules, applied to every paper trade plan.
-const MONEY_MGT_DEFAULTS = {
-  capital: 400000,      // account capital (₹) — default trading capital
-  useSL: false,         // if true, force the fixed SL distance below
-  slPoints: 50,         // fixed stop-loss distance in price points
-  rr: 2,                // reward:risk multiple (1, 1.5, 2, 2.5) or "trail"
-  trailMaxRR: 3,        // in "trail" mode, run until this R:R (up to 50)
-};
-function getMoneyMgt() {
-  try { return { ...MONEY_MGT_DEFAULTS, ...JSON.parse(localStorage.getItem("alphaedge_money_mgt") || "{}") }; }
-  catch { return { ...MONEY_MGT_DEFAULTS }; }
-}
-function setMoneyMgt(v) {
-  try { localStorage.setItem("alphaedge_money_mgt", JSON.stringify(v)); } catch { /* ignore */ }
 }
 
 // ─── AUTO SIGNAL ENGINE ────────────────────────────────────────────────────────
@@ -4936,26 +4846,6 @@ function CalendarPage() {
 
 // ─── SETTINGS PAGE ────────────────────────────────────────────────────────────
 // ─── SETTINGS STORAGE HELPERS ────────────────────────────────────────────────
-const SETTINGS_KEY = "alphaedge_settings";
-
-function loadSettings() {
-  try {
-    const raw = localStorage.getItem(SETTINGS_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch { return null; }
-}
-
-function persistSettings(data) {
-  try {
-    const existing = loadSettings() || {};
-    const merged = { ...existing, ...data };
-    // Deep-merge broker so fields set elsewhere are not wiped when the Settings
-    // page saves its partial broker state.
-    merged.broker = { ...(existing.broker || {}), ...(data.broker || {}) };
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(merged));
-  } catch {}
-}
-
 function SettingsPage() {
   // Load persisted settings on first render
   const saved0 = loadSettings() || {};
@@ -7379,6 +7269,42 @@ export default function AlphaEdge() {
     setHistory(updatedHistory);
   },[]);
 
+  // Log an Option-Score recommendation to history as a paper trade. The full
+  // premium-tracked lifecycle lands in Phase 7; this records the decision now so
+  // the recommendation and its factor breakdown are captured for R&D.
+  const handlePaperTrade = useCallback(async (result)=>{
+    if (!result || !result.strike) return;
+    const record = {
+      id: `SCORE-${Date.now()}`,
+      timestamp: Date.now(),
+      asset: ASSETS.find(a=>a.id===result.underlying)?.label || result.underlying,
+      assetId: result.underlying,
+      timeframe: "options",
+      nature: "Intraday",
+      bias: result.direction === "CE" ? "BULLISH" : "BEARISH",
+      confidence: result.score,
+      setup: `Score ${result.score} · ${result.strike.strike}${result.direction} · ${result.regime.label}`,
+      entry: result.strike.ltp,
+      optionPremium: result.strike.ltp,
+      stopLoss: result.plan?.slPrice,
+      takeProfit1: result.plan?.tgtPrice,
+      riskReward: result.plan?.rr,
+      expiry: result.strike.expiry,
+      strike: result.strike.strike,
+      direction: result.direction,
+      summary: result.report.map(l=>`${l.k}: ${l.v}`).join(" · "),
+      scoreFactors: Object.fromEntries(Object.entries(result.factors).map(([k,f])=>[k, f.score01])),
+      regime: result.regime.regime,
+      outcome: "pending",
+      source: "Option Score",
+      tradeType: "Paper",
+      session: marketSession(result.underlying).session,
+    };
+    const updated = await appendSignal(record);
+    setHistory(updated);
+    setPage(7);   // jump to History so the user sees it logged
+  },[]);
+
   const pendingCount = history.filter(s=>s.outcome==="pending").length;
   const sideItems    = PAGES.map((p,i)=>({label:p,icon:PAGE_ICONS[i]}));
 
@@ -7387,6 +7313,10 @@ export default function AlphaEdge() {
       prices={prices} changes={changes} candles={candles} sources={sources}
       activeAsset={activeAsset} setActiveAsset={setActiveAsset}
       marketOpen={marketOpen} onRefresh={refreshNow} refreshing={refreshing}/>,
+
+    <OptionScorePage key="score" onPaperTrade={handlePaperTrade}/>,
+
+    <OiPulsePage key="oipulse"/>,
 
     <AISignalPage key="ai"
       onSignalSaved={handleSignalSaved}
@@ -7412,8 +7342,6 @@ export default function AlphaEdge() {
     <AnalyticsPage key="analytics" candles={candles} prices={prices} history={history}/>,
 
     <OptionsDeskPage key="options"/>,
-
-    <OiPulsePage key="oipulse"/>,
 
     <SettingsPage key="settings"/>,
   ];
@@ -7447,11 +7375,11 @@ export default function AlphaEdge() {
         {/* Nav items */}
         {sideItems.map((s,i)=>{
           const isActive = page===i;
-          // Badges: Alerts(5)=live price alerts unread, History(6)=pending, Calendar(8)=high-impact events
+          // Badges: Alerts(6)=live price alerts, History(7)=pending, Calendar(9)=high-impact events
           const priceAlertCount = [prices.NIFTY50, prices.BANKNIFTY, prices.SENSEX, prices.FINNIFTY].filter(Boolean).length;
-          const badge = i===5 ? priceAlertCount
-            : i===6 && pendingCount>0 ? pendingCount
-            : i===8 ? getEconEvents().filter(e=>e.impact==="high"&&!e.actual&&new Date(e.datetime).getTime()>=Date.now()).length
+          const badge = i===6 ? priceAlertCount
+            : i===7 && pendingCount>0 ? pendingCount
+            : i===9 ? getEconEvents().filter(e=>e.impact==="high"&&!e.actual&&new Date(e.datetime).getTime()>=Date.now()).length
             : 0;
           return (
             <div key={s.label} onClick={()=>setPage(i)}
@@ -7545,8 +7473,8 @@ export default function AlphaEdge() {
           <div style={{flex:1}}/>
 
           {/* History quick-stat in header when on other pages */}
-          {page!==5 && history.length>0 && (
-            <span onClick={()=>setPage(5)}
+          {page!==7 && history.length>0 && (
+            <span onClick={()=>setPage(7)}
               style={{fontSize:9,color:"#a78bfa",background:"#1e1040",padding:"3px 8px",borderRadius:5,
                 border:"0.5px solid #7c3aed40",cursor:"pointer",letterSpacing:"0.04em"}}>
               ◷ {history.length} signals · {pendingCount} pending

@@ -142,3 +142,68 @@ export function calcRSI(candles, period = 14) {
   }
   return rsi;
 }
+
+// True Range series (Wilder). candles: {high, low, close}. Returns TR[i>=1].
+export function trueRange(candles) {
+  const tr = [0];
+  for (let i = 1; i < candles.length; i++) {
+    const h = candles[i].high, l = candles[i].low, pc = candles[i - 1].close;
+    tr.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)));
+  }
+  return tr;
+}
+
+// Average True Range (Wilder-smoothed). Returns a series the length of candles.
+export function calcATR(candles, period = 14) {
+  if (candles.length <= period) return candles.map(() => 0);
+  const tr = trueRange(candles);
+  const out = new Array(candles.length).fill(0);
+  let atr = tr.slice(1, period + 1).reduce((a, b) => a + b, 0) / period;
+  out[period] = atr;
+  for (let i = period + 1; i < candles.length; i++) {
+    atr = (atr * (period - 1) + tr[i]) / period;
+    out[i] = atr;
+  }
+  return out;
+}
+
+// ADX / +DI / -DI (Wilder). Returns { adx, plusDI, minusDI } series.
+export function calcADX(candles, period = 14) {
+  const n = candles.length;
+  const zeros = () => new Array(n).fill(0);
+  const adx = zeros(), plusDI = zeros(), minusDI = zeros();
+  if (n <= 2 * period) return { adx, plusDI, minusDI };
+  const tr = trueRange(candles);
+  const pDM = [0], mDM = [0];
+  for (let i = 1; i < n; i++) {
+    const up = candles[i].high - candles[i - 1].high;
+    const down = candles[i - 1].low - candles[i].low;
+    pDM.push(up > down && up > 0 ? up : 0);
+    mDM.push(down > up && down > 0 ? down : 0);
+  }
+  // Wilder-smoothed sums
+  let atr = tr.slice(1, period + 1).reduce((a, b) => a + b, 0);
+  let sp = pDM.slice(1, period + 1).reduce((a, b) => a + b, 0);
+  let sm = mDM.slice(1, period + 1).reduce((a, b) => a + b, 0);
+  const dxArr = [];
+  for (let i = period + 1; i < n; i++) {
+    atr = atr - atr / period + tr[i];
+    sp = sp - sp / period + pDM[i];
+    sm = sm - sm / period + mDM[i];
+    const pdi = atr ? (sp / atr) * 100 : 0;
+    const mdi = atr ? (sm / atr) * 100 : 0;
+    plusDI[i] = pdi; minusDI[i] = mdi;
+    const dx = (pdi + mdi) ? Math.abs(pdi - mdi) / (pdi + mdi) * 100 : 0;
+    dxArr.push({ i, dx });
+  }
+  // ADX = Wilder-smoothed DX, seeded by the first `period` DX values.
+  if (dxArr.length >= period) {
+    let a = dxArr.slice(0, period).reduce((s, d) => s + d.dx, 0) / period;
+    adx[dxArr[period - 1].i] = a;
+    for (let k = period; k < dxArr.length; k++) {
+      a = (a * (period - 1) + dxArr[k].dx) / period;
+      adx[dxArr[k].i] = a;
+    }
+  }
+  return { adx, plusDI, minusDI };
+}

@@ -268,6 +268,33 @@ export async function fetchPremiumSeries(underlying, strike, type, { expiry = nu
   } catch (e) { return { ok: false, error: String(e) }; }
 }
 
+// Candles in the app's shape for a timeframe over `days` of history — wide
+// enough for the score engine's 50-bar trend/ADX reads (1H needs ~10 days).
+async function scoreCandles(underlying, tf, days) {
+  const today = new Date();
+  const from = new Date(today.getTime() - days * 86400000);
+  const fmt = d => d.toISOString().slice(0, 10);
+  const rows = await fetchDhanHistorical(underlying, tf, fmt(from), fmt(today)).catch(() => null);
+  if (!rows || !rows.length) return null;
+  return rows.map(r => ({ open: r.open, high: r.high, low: r.low, close: r.close,
+    bull: r.close >= r.open, vol: r.volume || 0, ts: new Date(r.time).getTime() }));
+}
+
+// One-shot pull of everything the Option Buying Score engine needs for one
+// underlying: option chain, OI trend, VIX, and 5m/15m/1H candles. Returns
+// { chain, oiTrend, vix, candles5m, candles15m, candles1H } (candles in app shape).
+export async function fetchScoreInputs(underlying, range = 8) {
+  const [chain, oiTrend, vix, candles5m, candles15m, candles1H] = await Promise.all([
+    fetchOptionChain(underlying, range),
+    fetchOiTrend(underlying, 5),
+    fetchVix(),
+    scoreCandles(underlying, "5m", 5),
+    scoreCandles(underlying, "15m", 10),
+    scoreCandles(underlying, "1H", 12),
+  ]);
+  return { chain, oiTrend, vix, candles5m, candles15m, candles1H };
+}
+
 // ─── Lot sizes ────────────────────────────────────────────────────────────────
 export function getStoredLots() {
   try { return JSON.parse(localStorage.getItem("alphaedge_lot_sizes") || "{}"); }
