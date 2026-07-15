@@ -41,7 +41,8 @@ export default function PaperTradesPage() {
   const refresh = useCallback(async () => {
     setBusy(true);
     // Autonomous scanner's record (separate source — a JSON file the bridge serves).
-    try { setAuto(await fetchAutoPaperTrades()); } catch { /* bridge offline */ }
+    let a = null;
+    try { a = await fetchAutoPaperTrades(); setAuto(a); } catch { /* bridge offline */ }
     const h = await loadHistory();
     // resolve any that have hit SL/target/time-stop
     try {
@@ -49,10 +50,12 @@ export default function PaperTradesPage() {
       if (changed) { await saveHistory(next); setHistory(next); }
       else setHistory(h);
     } catch { setHistory(h); }
-    // pull last premium for the still-open trades (live P&L)
-    const open = openPaperTrades(h);
+    // pull last premium for EVERY still-open trade — manual AND autonomous — so
+    // both blotters can show a running P&L (keyed by trade id in one livePrem map).
+    const manualOpen = openPaperTrades(h);
+    const autoOpenNow = (a?.ok && Array.isArray(a.trades)) ? a.trades.filter(t => (t.outcome || "pending") === "pending") : [];
     const prem = {};
-    await Promise.all(open.map(async t => {
+    await Promise.all([...manualOpen, ...autoOpenNow].map(async t => {
       try {
         const type = t.direction || (t.bias === "BULLISH" ? "CE" : "PE");
         const r = await fetchPremiumSeries(t.assetId, t.strike, type, { expiry: t.expiry, sinceTs: entryTsToUtc(t.entryTs || t.timestamp) });
@@ -158,20 +161,26 @@ export default function PaperTradesPage() {
               {autoOpen.length > 0 && (
                 <div style={{ overflowX: "auto", marginTop: 10 }}>
                   <div style={{ fontSize: 8, color: C.faint, marginBottom: 4 }}>OPEN ({autoOpen.length})</div>
-                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10, fontFamily: "monospace", minWidth: 700 }}>
-                    <thead><tr style={{ color: C.faint }}>{["Leg", "Style", "Entry ₹", "SL ₹", "Target ₹", "Lots", "Opened"].map(h => <th key={h} style={th}>{h}</th>)}</tr></thead>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10, fontFamily: "monospace", minWidth: 780 }}>
+                    <thead><tr style={{ color: C.faint }}>{["Leg", "Style", "Entry ₹", "Live ₹", "SL ₹", "Target ₹", "Lots", "Running P&L", "Opened"].map(h => <th key={h} style={th}>{h}</th>)}</tr></thead>
                     <tbody>
-                      {autoOpen.map(t => (
+                      {autoOpen.map(t => {
+                        const pnl = livePnl(t);
+                        const p = livePrem[t.id];
+                        return (
                         <tr key={t.id} style={{ borderTop: `0.5px solid #0d1b2a` }}>
                           <td style={{ ...td, color: t.direction === "CE" ? C.green : C.red, fontWeight: 700 }}>{t.strike} {t.direction}<div style={{ fontSize: 8, color: C.faint }}>{t.assetId} · {t.expiry?.slice(5)}</div></td>
                           <td style={td}>{styleLabel[t.style] || "—"}</td>
                           <td style={td}>{fmt(t.optionPremium)}</td>
+                          <td style={{ ...td, color: Number.isFinite(p) ? (p >= t.optionPremium ? C.green : C.red) : C.faint }}>{Number.isFinite(p) ? fmt(p) : "…"}</td>
                           <td style={{ ...td, color: C.red }}>{fmt(t.slPremium)}</td>
                           <td style={{ ...td, color: C.green }}>{fmt(t.tgtPremium)}</td>
                           <td style={td}>{t.lots}×{t.lotSize}</td>
+                          <td style={{ ...td, color: pnl == null ? C.faint : pnl >= 0 ? C.green : C.red, fontWeight: 700 }}>{pnl == null ? "…" : fmtRs(pnl)}</td>
                           <td style={{ ...td, color: C.faint }}>{new Date(t.timestamp).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}</td>
                         </tr>
-                      ))}
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -214,7 +223,7 @@ export default function PaperTradesPage() {
             <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10, fontFamily: "monospace", minWidth: 820 }}>
                 <thead><tr style={{ color: C.faint }}>
-                  {["Leg", "Style", "Entry ₹", "Live ₹", "SL ₹", "Target ₹", "Lots", "Live P&L", ""].map(h => <th key={h} style={th}>{h}</th>)}
+                  {["Leg", "Style", "Entry ₹", "Live ₹", "SL ₹", "Target ₹", "Lots", "Running P&L", ""].map(h => <th key={h} style={th}>{h}</th>)}
                 </tr></thead>
                 <tbody>
                   {open.map(t => {
