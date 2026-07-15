@@ -49,8 +49,10 @@ UNDERLYINGS = {
     "FINNIFTY":  {"id": 27, "seg": "IDX_I"},   # monthly-only expiries since NSE dropped its weekly
 }
 
-POLL_SECONDS    = 60     # snapshot cadence
-RATE_LIMIT_SEC  = 3.5    # Dhan option-chain limit is ~1 request / 3s — be safe
+POLL_SECONDS      = 60     # snapshot cadence
+RATE_LIMIT_SEC    = 3.5    # Dhan option-chain limit is ~1 request / 3s — be safe
+MAX_CHAIN_RETRIES = 2      # retry a throttled option-chain call (the bridge shares this account's limit)
+RETRY_BACKOFF_SEC = 4.0    # wait past Dhan's ~3s throttle window before retrying
 COLUMNS = ["time","underlying","under_ltp","expiry","strike","type","ltp","oi",
            "prev_oi","iv","volume","delta","theta","vega","bid","ask"]
 
@@ -97,6 +99,19 @@ def _unwrap(resp):
     return d if isinstance(d, dict) else {}
 
 
+def _is_throttle(err) -> bool:
+    """A Dhan option-chain rate-limit hit returns an empty/None-filled remarks
+    dict (error_code/type/message all None) or a 'rate limit' string. Those are
+    transient (the bridge shares this account's ~1-req/3s budget) and worth a
+    retry; a real error (bad token, bad params) is surfaced instead."""
+    if err in (None, "", {}):
+        return True
+    if isinstance(err, dict):
+        return all(v in (None, "", "null") for v in err.values())
+    s = str(err).lower()
+    return any(k in s for k in ("rate", "limit", "too many", "904", "throttl"))
+
+
 def nearest_expiry(dhan, meta) -> str | None:
     resp = dhan.expiry_list(meta["id"], meta["seg"])
     d = _unwrap(resp)
@@ -133,10 +148,21 @@ def append_rows(name: str, rows: list[dict]) -> int:
 
 
 def snapshot(dhan, name: str, meta: dict, expiry: str, atm_range: int) -> int:
-    resp = dhan.option_chain(meta["id"], meta["seg"], expiry)
-    d = _unwrap(resp)
-    if "_error" in d:
-        log(f"  {name}: option_chain failed: {d['_error']}"); return 0
+    # Retry a throttled option-chain call: the bridge (app + scanner) shares this
+    # Dhan account's ~1-req/3s limit, so a collision throttles us intermittently.
+    # A short backoff clears the window, so the retry almost always succeeds.
+    d = {}
+    for attempt in range(1 + MAX_CHAIN_RETRIES):
+        d = _unwrap(dhan.option_chain(meta["id"], meta["seg"], expiry))
+        if "_error" not in d:
+            break
+        throttled = _is_throttle(d["_error"])
+        if throttled and attempt < MAX_CHAIN_RETRIES:
+            log(f"  {name}: option_chain throttled (shared Dhan rate limit) — retry {attempt + 1}/{MAX_CHAIN_RETRIES} in {RETRY_BACKOFF_SEC:.0f}s")
+            time.sleep(RETRY_BACKOFF_SEC)
+            continue
+        log(f"  {name}: option_chain failed{' after retries' if throttled else ''}: {d['_error']}")
+        return 0
     under_ltp = float(d.get("last_price") or 0)
     oc_map = d.get("oc") or {}
     if not oc_map or not under_ltp:
