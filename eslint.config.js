@@ -8,6 +8,19 @@ export default [
   { ignores: ['dist', 'node_modules', 'public'] },
   js.configs.recommended,
   {
+    // Node ES-module scripts (scanner, replay) — Node + fetch/AbortSignal globals.
+    files: ['**/*.mjs'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'module',
+      globals: { ...globals.node, ...globals.browser },
+    },
+    rules: {
+      'no-empty': ['warn', { allowEmptyCatch: true }],
+      'no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
+    },
+  },
+  {
     files: ['**/*.{js,jsx}'],
     languageOptions: {
       ecmaVersion: 2022,

@@ -5,6 +5,8 @@ dist/
 *.log
 .DS_Store
 Thumbs.db
+# scratch commit-message files (git commit -F _commitmsg.txt)
+_*
 
 # ── python envs / caches ─────────────────────────────
 .venv/
@@ -23,6 +25,7 @@ mt5-bridge/risk_state.json
 mt5-bridge/nse_holidays.json
 strategy-lab/data/
 strategy-lab/results/
+strategy-lab/paper/
 strategy-lab/dhan_scrip_master.csv
 
 # secrets backups + oversized binaries

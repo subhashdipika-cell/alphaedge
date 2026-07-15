@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
-import { loadHistory, saveHistory, updateOutcome } from "../state/history.js";
+import { loadHistory, saveHistory } from "../state/history.js";
 import { getOptionPaperTrades, openPaperTrades, paperTradeStats, resolveOpenPaperTrades } from "../state/paperTrades.js";
-import { fetchPremiumSeries } from "../data/bridge.js";
-import { entryTsToUtc, estimateCost } from "../engines/resolve.js";
+import { fetchPremiumSeries, fetchAutoPaperTrades } from "../data/bridge.js";
+import { entryTsToUtc } from "../engines/resolve.js";
 import { netOptionPnl, exchangeFor } from "../engines/costs.js";
 
 // ─── PAPER TRADES — option paper-position blotter ─────────────────────────────
@@ -36,9 +36,12 @@ export default function PaperTradesPage() {
   const [history, setHistory] = useState([]);
   const [livePrem, setLivePrem] = useState({});   // id → last premium
   const [busy, setBusy] = useState(false);
+  const [auto, setAuto] = useState(null);          // headless-scanner track record (bridge /paper/auto)
 
   const refresh = useCallback(async () => {
     setBusy(true);
+    // Autonomous scanner's record (separate source — a JSON file the bridge serves).
+    try { setAuto(await fetchAutoPaperTrades()); } catch { /* bridge offline */ }
     const h = await loadHistory();
     // resolve any that have hit SL/target/time-stop
     try {
@@ -72,6 +75,13 @@ export default function PaperTradesPage() {
   const stats = useMemo(() => paperTradeStats(history), [history]);
   const byStyle = useMemo(() => paperTradeStats(history, t => t.style || "—"), [history]);
 
+  // ── Autonomous headless-scanner track record (from the bridge, not localStorage) ──
+  const autoTrades = useMemo(() => (auto?.ok && Array.isArray(auto.trades)) ? auto.trades : [], [auto]);
+  const autoOpen = useMemo(() => autoTrades.filter(t => (t.outcome || "pending") === "pending"), [autoTrades]);
+  const autoClosed = useMemo(() => autoTrades.filter(t => t.outcome === "win" || t.outcome === "loss").sort((a, b) => b.timestamp - a.timestamp), [autoTrades]);
+  const autoStats = useMemo(() => paperTradeStats(autoTrades), [autoTrades]);
+  const autoUpdated = auto?.updatedAt ? new Date(auto.updatedAt) : null;
+
   // Live P&L NET of estimated round-trip cost (brokerage + taxes).
   const livePnl = (t) => {
     const p = livePrem[t.id];
@@ -98,7 +108,7 @@ export default function PaperTradesPage() {
 
         {/* ── Summary ── */}
         <Card
-          title="PAPER TRADES — PREMIUM-TRACKED BLOTTER"
+          title="MANUAL PAPER TRADES — PREMIUM-TRACKED BLOTTER"
           right={
             <button onClick={refresh} disabled={busy}
               style={{ fontSize: 10, padding: "4px 12px", background: C.bg, border: `0.5px solid ${C.edge}`, borderRadius: 6, color: C.blue, cursor: busy ? "default" : "pointer", fontFamily: "monospace" }}>
@@ -124,8 +134,80 @@ export default function PaperTradesPage() {
           )}
         </Card>
 
+        {/* ── Autonomous headless scanner ── */}
+        <Card
+          title="⬡ AUTONOMOUS SCANNER — HEADLESS TRACK RECORD"
+          right={
+            <span style={{ fontSize: 8, fontFamily: "monospace", color: autoTrades.length ? C.green : C.faint }}>
+              {autoTrades.length ? `● running · ${autoUpdated ? autoUpdated.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : ""}` : "○ not started"}
+            </span>
+          }
+          style={{ borderColor: autoTrades.length ? "#22c55e40" : C.edge }}
+        >
+          {autoTrades.length === 0 ? (
+            <Empty msg={auto?.note || "Scanner hasn't logged any trades yet. Start it with:  node scripts/scanner.mjs  (the launcher starts it automatically)."} />
+          ) : (
+            <>
+              <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
+                <Stat label="Open" value={autoOpen.length} color={C.amber} />
+                <Stat label="Resolved" value={autoStats.n} />
+                <Stat label="Win Rate" value={autoStats.n ? `${autoStats.winRate.toFixed(0)}%` : "—"} color={autoStats.winRate >= 50 ? C.green : C.red} />
+                <Stat label="Expectancy" value={autoStats.n ? `${autoStats.expectancyR >= 0 ? "+" : ""}${autoStats.expectancyR.toFixed(2)}R` : "—"} color={autoStats.expectancyR >= 0 ? C.green : C.red} />
+                <Stat label="Net P&L" value={autoStats.n ? fmtRs(autoStats.pnlRs) : "—"} color={autoStats.pnlRs >= 0 ? C.green : C.red} />
+              </div>
+              {autoOpen.length > 0 && (
+                <div style={{ overflowX: "auto", marginTop: 10 }}>
+                  <div style={{ fontSize: 8, color: C.faint, marginBottom: 4 }}>OPEN ({autoOpen.length})</div>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10, fontFamily: "monospace", minWidth: 700 }}>
+                    <thead><tr style={{ color: C.faint }}>{["Leg", "Style", "Entry ₹", "SL ₹", "Target ₹", "Lots", "Opened"].map(h => <th key={h} style={th}>{h}</th>)}</tr></thead>
+                    <tbody>
+                      {autoOpen.map(t => (
+                        <tr key={t.id} style={{ borderTop: `0.5px solid #0d1b2a` }}>
+                          <td style={{ ...td, color: t.direction === "CE" ? C.green : C.red, fontWeight: 700 }}>{t.strike} {t.direction}<div style={{ fontSize: 8, color: C.faint }}>{t.assetId} · {t.expiry?.slice(5)}</div></td>
+                          <td style={td}>{styleLabel[t.style] || "—"}</td>
+                          <td style={td}>{fmt(t.optionPremium)}</td>
+                          <td style={{ ...td, color: C.red }}>{fmt(t.slPremium)}</td>
+                          <td style={{ ...td, color: C.green }}>{fmt(t.tgtPremium)}</td>
+                          <td style={td}>{t.lots}×{t.lotSize}</td>
+                          <td style={{ ...td, color: C.faint }}>{new Date(t.timestamp).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {autoClosed.length > 0 && (
+                <div style={{ overflowX: "auto", marginTop: 10 }}>
+                  <div style={{ fontSize: 8, color: C.faint, marginBottom: 4 }}>RESOLVED ({autoClosed.length})</div>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10, fontFamily: "monospace", minWidth: 760 }}>
+                    <thead><tr style={{ color: C.faint }}>{["Date", "Leg", "Style", "Entry ₹", "Exit ₹", "R", "Net P&L", "Result", "Why"].map(h => <th key={h} style={th}>{h}</th>)}</tr></thead>
+                    <tbody>
+                      {autoClosed.slice(0, 40).map(t => (
+                        <tr key={t.id} style={{ borderTop: `0.5px solid #0d1b2a`, opacity: 0.92 }}>
+                          <td style={{ ...td, color: C.faint }}>{new Date(t.timestamp).toLocaleDateString("en-IN", { day: "2-digit", month: "short" })}</td>
+                          <td style={{ ...td, color: t.direction === "CE" ? C.green : C.red }}>{t.strike} {t.direction}</td>
+                          <td style={td}>{styleLabel[t.style] || "—"}</td>
+                          <td style={td}>{fmt(t.optionPremium)}</td>
+                          <td style={td}>{fmt(t.exitPremium)}</td>
+                          <td style={{ ...td, color: (t.rMultiple || 0) >= 0 ? C.green : C.red }}>{Number.isFinite(t.rMultiple) ? `${t.rMultiple >= 0 ? "+" : ""}${t.rMultiple}R` : "—"}</td>
+                          <td style={{ ...td, color: (t.pnlRs || 0) >= 0 ? C.green : C.red, fontWeight: 700 }}>{fmtRs(t.pnlRs)}</td>
+                          <td style={td}><span style={{ color: t.outcome === "win" ? C.green : C.red, background: (t.outcome === "win" ? C.green : C.red) + "18", border: `0.5px solid ${(t.outcome === "win" ? C.green : C.red)}40`, borderRadius: 4, padding: "1px 7px", fontSize: 9 }}>{t.outcome.toUpperCase()}</span></td>
+                          <td style={{ ...td, color: C.faint, textAlign: "left", maxWidth: 150, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={t.exitReason}>{t.exitReason || "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )}
+          <div style={{ marginTop: 8, fontSize: 8, color: C.faint }}>
+            Runs headless (no browser needed) via scripts/scanner.mjs — scores all indices every ~5 min in-session and auto-logs every TRADE-grade setup. Same engines as the Option Score page. Paper only.
+          </div>
+        </Card>
+
         {/* ── Open positions ── */}
-        <Card title={`OPEN POSITIONS (${open.length})`}>
+        <Card title={`MANUAL — OPEN POSITIONS (${open.length})`}>
           {open.length === 0 ? (
             <Empty msg="No open paper trades. Accept one from the Option Score page." />
           ) : (
@@ -162,7 +244,7 @@ export default function PaperTradesPage() {
         </Card>
 
         {/* ── Resolved ── */}
-        <Card title={`RESOLVED (${closed.length})`}>
+        <Card title={`MANUAL — RESOLVED (${closed.length})`}>
           {closed.length === 0 ? <Empty msg="No resolved paper trades yet." /> : (
             <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10, fontFamily: "monospace", minWidth: 820 }}>

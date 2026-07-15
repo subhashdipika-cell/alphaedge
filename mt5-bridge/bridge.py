@@ -661,6 +661,20 @@ def rd_replay():
         return {"ok": False, "error": f"replay read failed: {e}"}
 
 
+def paper_auto():
+    """Serve the headless scanner's paper-trade track record
+    (scripts/scanner.mjs output) for the app's Paper Trades page. Read-only —
+    the browser can't touch strategy-lab/paper; the scanner is the only writer."""
+    fp = pathlib.Path(__file__).parent.parent / "strategy-lab" / "paper" / "auto_paper_trades.json"
+    try:
+        if not fp.exists():
+            return {"ok": True, "trades": [], "summary": {}, "note": "scanner not run yet — start scripts/scanner.mjs"}
+        data = json.loads(fp.read_text(encoding="utf-8"))
+        return {"ok": True, **data}
+    except Exception as e:
+        return {"ok": False, "error": f"auto paper read failed: {e}"}
+
+
 def dhan_vix():
     quotes = dhan_index_quotes()
     vix = quotes.get("INDIAVIX") or {}
@@ -714,6 +728,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, dhan_vix())
         elif parsed.path.startswith("/rd/replay"):
             self._send(200, rd_replay())
+        elif parsed.path.startswith("/paper/auto"):
+            self._send(200, paper_auto())
         elif parsed.path.startswith("/market/holiday"):
             today = _ist_day()
             hols = indian_holidays()

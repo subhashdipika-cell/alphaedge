@@ -235,6 +235,18 @@ export async function fetchReplay() {
   } catch (e) { return { ok: false, error: String(e) }; }
 }
 
+// Headless scanner's autonomous paper-trade track record (scripts/scanner.mjs
+// output, served read-only by the bridge). Returns {ok, trades[], summary} or
+// {ok:false, error}. Empty trades[] when the scanner hasn't run yet.
+export async function fetchAutoPaperTrades() {
+  const base = bridgeBaseUrl();
+  if (!base) return { ok: false, error: "no bridge URL" };
+  try {
+    const r = await fetch(base + "/paper/auto", { signal: AbortSignal.timeout(8000) });
+    return await r.json();
+  } catch (e) { return { ok: false, error: String(e) }; }
+}
+
 // India VIX (live via Dhan, or a collected-ATM-IV percentile proxy off-hours).
 // Returns the bridge payload {ok, source:"dhan"|"proxy", vix?, proxy} or null.
 export async function fetchVix() {
