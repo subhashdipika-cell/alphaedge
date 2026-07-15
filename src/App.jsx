@@ -4158,7 +4158,12 @@ async function autoResolveFromPrice() {
 }
 
 // ─── HISTORY PAGE ─────────────────────────────────────────────────────────────
-function HistoryPage({ history, setHistory }) {
+function HistoryPage({ history: allHistory, setHistory }) {
+  // AlphaEdge is options-only. Legacy spot signals (from the pre-4.0 Auto Signal
+  // engine, which had no strike/premium) may still sit in localStorage — filter
+  // them out so the archive shows option trades only. Non-destructive: setHistory
+  // still writes the full store; this just scopes what History displays.
+  const history = useMemo(() => (allHistory || []).filter(isOptionPaperTrade), [allHistory]);
   const [filterAsset, setFilterAsset]     = useState("ALL");
   const [filterOutcome, setFilterOutcome] = useState("ALL");
   const [filterNature, setFilterNature]   = useState("ALL");

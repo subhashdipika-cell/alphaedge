@@ -3,6 +3,7 @@
 // Obsidian export. Every save re-trains the learning profile.
 
 import { saveSignalLearning } from "../engines/learning.js";
+import { isOptionPaperTrade } from "../engines/resolve.js";
 
 export const HISTORY_KEY = "signal-history";
 export const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
@@ -13,10 +14,29 @@ export async function loadHistory() {
     if (!raw) return [];
     const arr = JSON.parse(raw);
     const cutoff = Date.now() - THIRTY_DAYS;
-    const filtered = arr.filter(s => s.timestamp > cutoff);
+    // AlphaEdge is options-only: keep option paper trades inside the 30-day
+    // window and drop legacy spot signals (pre-4.0 Auto Signal — no strike/
+    // premium). If any junk is present, physically purge it once — from the live
+    // store AND the durable archive — so it stops polluting metrics + learning.
+    const filtered = arr.filter(s => s.timestamp > cutoff && isOptionPaperTrade(s));
+    const hadJunk = arr.some(s => s.timestamp > cutoff && !isOptionPaperTrade(s));
+    if (hadJunk) {
+      try { localStorage.setItem(HISTORY_KEY, JSON.stringify(filtered)); pruneArchiveToOptions(); } catch { /* ignore */ }
+    }
     saveSignalLearning(filtered);
     return filtered;
   } catch { return []; }
+}
+
+// Strip legacy non-option records from the durable archive too (one-time clean).
+function pruneArchiveToOptions() {
+  try {
+    const raw = localStorage.getItem(TRADE_ARCHIVE_KEY);
+    if (!raw) return;
+    const arr = JSON.parse(raw);
+    const opt = arr.filter(isOptionPaperTrade);
+    if (opt.length !== arr.length) localStorage.setItem(TRADE_ARCHIVE_KEY, JSON.stringify(opt));
+  } catch { /* best-effort — never break a normal load */ }
 }
 
 export async function saveHistory(records) {
