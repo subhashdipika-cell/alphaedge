@@ -251,14 +251,11 @@ function buildMonthlyMarkdown(month, records) {
     return t;
   };
 
-  // Broker-realized stats — ONLY trades that actually filled and closed on
-  // MT5 (realizedUsd synced from the bridge). The theoretical R/win-rate above
-  // counts unresolved signals at their planned RR; cross-app audit (Jul 2026)
-  // showed that flatters strategies by 3-8x vs what the broker actually pays.
-  const mt5 = records.filter(r => r.realizedUsd != null && (r.mt5State === "closed" || r.outcome === "win" || r.outcome === "loss"));
-  const mt5Wins = mt5.filter(r => Number(r.realizedUsd) > 0).length;
-  const mt5Net  = mt5.reduce((a, r) => a + Number(r.realizedUsd || 0), 0);
-  const mt5Wr   = mt5.length ? (100 * mt5Wins / mt5.length) : null;
+  // Paper-trade realized P&L (₹, net of brokerage + taxes) — the resolved option
+  // paper trades. The theoretical R/win-rate above counts unresolved signals at
+  // their planned RR; this line is what the premium path actually paid.
+  const resolvedRs = records.filter(r => (r.outcome === "win" || r.outcome === "loss") && r.pnlRs != null);
+  const netRs = resolvedRs.reduce((a, r) => a + Number(r.pnlRs || 0), 0);
 
   let md = `---\n`
     + `type: monthly-trade-summary\n`
@@ -273,23 +270,16 @@ function buildMonthlyMarkdown(month, records) {
     + `win_rate: ${wr}\n`
     + `net_r: ${s.netR.toFixed(1)}\n`
     + `avg_rr: ${s.avgRR.toFixed(2)}\n`
-    + `mt5_trades: ${mt5.length}\n`
-    + `mt5_win_rate: ${mt5Wr == null ? "" : mt5Wr.toFixed(1)}\n`
-    + `mt5_net_usd: ${mt5Net.toFixed(2)}\n`
-    // net_usd: unified cross-app money field for the vault dashboard — the
-    // broker-realized USD net (same as mt5_net_usd; net_r above stays as the
-    // theoretical R figure).
-    + `net_usd: ${mt5Net.toFixed(2)}\n`
+    + `paper_resolved: ${resolvedRs.length}\n`
+    + `net_inr: ${netRs.toFixed(0)}\n`
     + `tags:\n  - ${OBSIDIAN_APP}\n  - monthly\n  - trades\n  - ${month}\n`
     + `---\n\n`;
   md += `# AlphaEdge — ${monthName} ${yr} Trade Summary\n\n`;
   md += `**${s.total} trades** · ${s.wins}W / ${s.losses}L · **${wr || "—"}% win rate** · `
       + `net **${s.netR >= 0 ? "+" : ""}${s.netR.toFixed(1)}R** · avg RR ${s.avgRR.toFixed(2)} · ${s.pending} pending\n`;
-  md += `\n> **Broker-realized (MT5 fills, net of spread): ${mt5.length} trades · `
-      + `${mt5Wr == null ? "—" : mt5Wr.toFixed(1) + "%"} win rate · `
-      + `${mt5Net >= 0 ? "+" : ""}$${mt5Net.toFixed(2)}.** `
-      + `The theoretical figures above count unresolved signals at planned RR — `
-      + `trust this line, not those.\n`;
+  md += `\n> **Paper-realized (premium path, net of costs): ${resolvedRs.length} trades · `
+      + `net ₹${netRs >= 0 ? "+" : ""}${netRs.toFixed(0)}.** `
+      + `The R figures above count unresolved signals at planned RR — trust this line for actual P&L.\n`;
   md += section("setup",     monthlyGroupRows(records, r => r.setup));
   md += section("asset",     monthlyGroupRows(records, r => r.asset || r.assetId));
   md += section("timeframe", monthlyGroupRows(records, r => r.timeframe));
@@ -3136,14 +3126,13 @@ function KillZoneClock({ expanded=false }) {
 }
 
 function RiskCalcPage() {
-  const [acctSize,  setAcctSize]  = useState(10000);
+  const [acctSize,  setAcctSize]  = useState(400000);
   const [riskPct,   setRiskPct]   = useState(1);
-  const [entry,     setEntry]     = useState(97000);
-  const [sl,        setSl]        = useState(95500);
-  const [tp1,       setTp1]       = useState(99500);
-  const [tp2,       setTp2]       = useState(101000);
+  const [entry,     setEntry]     = useState(150);
+  const [sl,        setSl]        = useState(105);
+  const [tp1,       setTp1]       = useState(240);
+  const [tp2,       setTp2]       = useState(330);
   const [asset,     setAsset]     = useState("NIFTY50");
-  const [leverage,  setLeverage]  = useState(1);
   const [dir,       setDir]       = useState("LONG");
   const [scenarios, setScenarios] = useState([]);
 
@@ -3163,7 +3152,6 @@ function RiskCalcPage() {
   const rr2       = slPips > 0 ? tp2Pips / slPips : 0;
   const reward1   = posSize * tp1Pips;
   const reward2   = posSize * tp2Pips;
-  const reqMargin = posVal / leverage;
 
   // Scenario matrix
   const buildScenarios = () => {
@@ -3295,26 +3283,24 @@ function RiskCalcPage() {
                 ))}
               </div>
             </div>
-            {inp(acctSize,setAcctSize,"Account Size ($)",1000)}
+            {inp(acctSize,setAcctSize,"Capital (₹)",10000)}
             {inp(riskPct,setRiskPct,"Risk % per Trade",0.25)}
           </div>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:8}}>
-            {inp(entry,setEntry,"Entry Price",10)}
-            {inp(sl,setSl,"Stop Loss",10)}
-            {inp(tp1,setTp1,"Take Profit 1",10)}
-            {inp(tp2,setTp2,"Take Profit 2",10)}
-            {inp(leverage,setLeverage,"Leverage (x)",1)}
+          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}}>
+            {inp(entry,setEntry,"Entry Premium (₹)",5)}
+            {inp(sl,setSl,"SL Premium (₹)",5)}
+            {inp(tp1,setTp1,"Target 1 (₹)",5)}
+            {inp(tp2,setTp2,"Target 2 (₹)",5)}
           </div>
         </div>
 
         {/* Results */}
-        <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:8}}>
-          {colCard("Risk Amount",`$${fmtN(riskAmt,0)}`,`${riskPct}% of account`,"#ef4444")}
-          {colCard("Position Size",fmtN(posSize,4),`$${fmtN(posVal,0)} notional`,"#60a5fa")}
-          {colCard("SL Distance",`${fmtN(slPips,0)} pts`,`${fmtN(slPct,2)}% from entry`,"#ef4444")}
-          {colCard("Reward TP1",`$${fmtN(reward1,0)}`,`RR 1:${fmtN(rr1,2)}`,"#22c55e")}
-          {colCard("Reward TP2",`$${fmtN(reward2,0)}`,`RR 1:${fmtN(rr2,2)}`,"#34d399")}
-          {colCard("Margin Req",`$${fmtN(reqMargin,0)}`,`${leverage}x leverage`,"#a78bfa")}
+        <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:8}}>
+          {colCard("Risk Amount",`₹${fmtN(riskAmt,0)}`,`${riskPct}% of capital`,"#ef4444")}
+          {colCard("Quantity",fmtN(posSize,0),`₹${fmtN(posVal,0)} premium outlay`,"#60a5fa")}
+          {colCard("SL Distance",`₹${fmtN(slPips,0)}`,`${fmtN(slPct,2)}% of premium`,"#ef4444")}
+          {colCard("Reward T1",`₹${fmtN(reward1,0)}`,`RR 1:${fmtN(rr1,2)}`,"#22c55e")}
+          {colCard("Reward T2",`₹${fmtN(reward2,0)}`,`RR 1:${fmtN(rr2,2)}`,"#34d399")}
         </div>
 
         {/* Visual RR bar */}
@@ -3351,9 +3337,9 @@ function RiskCalcPage() {
               background:"rgba(34,197,94,0.12)",border:"0.5px solid rgba(34,197,94,0.3)",borderRadius:2}}/>
           </div>
           <div style={{display:"flex",justifyContent:"center",gap:20,marginTop:4}}>
-            <span style={{fontSize:9,color:"#ef4444"}}>◀ Risk: ${fmtN(riskAmt,0)}</span>
-            <span style={{fontSize:10,color:"#60a5fa",fontWeight:700}}>Entry: ${fmtN(entry,0)}</span>
-            <span style={{fontSize:9,color:"#22c55e"}}>Reward TP1: ${fmtN(reward1,0)} ▶</span>
+            <span style={{fontSize:9,color:"#ef4444"}}>◀ Risk: ₹{fmtN(riskAmt,0)}</span>
+            <span style={{fontSize:10,color:"#60a5fa",fontWeight:700}}>Entry: ₹{fmtN(entry,0)}</span>
+            <span style={{fontSize:9,color:"#22c55e"}}>Reward T1: ₹{fmtN(reward1,0)} ▶</span>
           </div>
         </div>
 
@@ -3370,7 +3356,7 @@ function RiskCalcPage() {
           {scenarios.length>0&&(
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:11,fontFamily:"monospace"}}>
               <thead>
-                <tr>{["Risk %","Risk $","Pos Size","Reward TP1","Reward TP2","Bal if Win","Bal if Loss"].map(h=>(
+                <tr>{["Risk %","Risk ₹","Quantity","Reward T1","Reward T2","Bal if Win","Bal if Loss"].map(h=>(
                   <th key={h} style={{textAlign:"left",padding:"5px 8px",fontSize:8,color:"#94a3b8",
                     borderBottom:"0.5px solid #1e3a5a",letterSpacing:"0.05em"}}>{h}</th>
                 ))}</tr>
@@ -3380,12 +3366,12 @@ function RiskCalcPage() {
                   <tr key={i} style={{borderBottom:"0.5px solid #0d1b2a",
                     background:sc.risk===riskPct?"#111e30":"transparent"}}>
                     <td style={{padding:"6px 8px",color:sc.risk===riskPct?"#60a5fa":"#94a3b8",fontWeight:sc.risk===riskPct?700:400}}>{sc.risk}%</td>
-                    <td style={{padding:"6px 8px",color:"#ef4444"}}>-${fmtN(sc.riskAmt,0)}</td>
-                    <td style={{padding:"6px 8px",color:"#e2e8f0"}}>{fmtN(sc.posSize,4)}</td>
-                    <td style={{padding:"6px 8px",color:"#22c55e"}}>+${fmtN(sc.reward1,0)}</td>
-                    <td style={{padding:"6px 8px",color:"#34d399"}}>+${fmtN(sc.reward2,0)}</td>
-                    <td style={{padding:"6px 8px",color:"#22c55e"}}>${fmtN(sc.newBalWin,0)}</td>
-                    <td style={{padding:"6px 8px",color:"#ef4444"}}>${fmtN(sc.newBalLoss,0)}</td>
+                    <td style={{padding:"6px 8px",color:"#ef4444"}}>-₹{fmtN(sc.riskAmt,0)}</td>
+                    <td style={{padding:"6px 8px",color:"#e2e8f0"}}>{fmtN(sc.posSize,0)}</td>
+                    <td style={{padding:"6px 8px",color:"#22c55e"}}>+₹{fmtN(sc.reward1,0)}</td>
+                    <td style={{padding:"6px 8px",color:"#34d399"}}>+₹{fmtN(sc.reward2,0)}</td>
+                    <td style={{padding:"6px 8px",color:"#22c55e"}}>₹{fmtN(sc.newBalWin,0)}</td>
+                    <td style={{padding:"6px 8px",color:"#ef4444"}}>₹{fmtN(sc.newBalLoss,0)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -3403,9 +3389,9 @@ function RiskCalcPage() {
           <div style={{fontSize:9,color:"#94a3b8",letterSpacing:"0.1em",marginBottom:10}}>KELLY CRITERION — OPTIMAL POSITION SIZING</div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
             {[
-              {wr:0.65,label:"Conservative (65% WR)"},
-              {wr:0.68,label:"Current System (68% WR)"},
-              {wr:0.72,label:"Optimistic (72% WR)"},
+              {wr:0.50,label:"Break-even (50% WR)"},
+              {wr:0.55,label:"Modest edge (55% WR)"},
+              {wr:0.60,label:"Strong edge (60% WR)"},
             ].map(({wr,label})=>{
               const kelly=wr-(1-wr)/rr1;
               const halfKelly=kelly/2;
@@ -3422,8 +3408,8 @@ function RiskCalcPage() {
                       <div style={{fontSize:14,fontWeight:700,color:"#60a5fa",fontFamily:"monospace"}}>{(halfKelly*100).toFixed(1)}%</div>
                     </div>
                     <div>
-                      <div style={{fontSize:8,color:"#7c8ea8"}}>$</div>
-                      <div style={{fontSize:14,fontWeight:700,color:"#60a5fa",fontFamily:"monospace"}}>${(acctSize*halfKelly).toFixed(0)}</div>
+                      <div style={{fontSize:8,color:"#7c8ea8"}}>₹ risk</div>
+                      <div style={{fontSize:14,fontWeight:700,color:"#60a5fa",fontFamily:"monospace"}}>₹{(acctSize*Math.max(0,halfKelly)).toFixed(0)}</div>
                     </div>
                   </div>
                 </div>
@@ -3431,8 +3417,8 @@ function RiskCalcPage() {
             })}
           </div>
           <div style={{marginTop:8,fontSize:10,color:"#7c8ea8",lineHeight:1.6}}>
-            ⚑ Half-Kelly is recommended for live trading — reduces variance while capturing 75% of Kelly growth rate.
-            Current 1% risk is {rr1>0?(1/rr1*100).toFixed(1):"-"}% of full Kelly at {fmtN(rr1,2)} RR.
+            ⚑ Half-Kelly reduces variance while capturing ~75% of the Kelly growth rate. Illustrative win-rate scenarios —
+            your real edge comes from the R&D track record. Current 1% risk is {rr1>0?(1/rr1*100).toFixed(1):"-"}% of full Kelly at {fmtN(rr1,2)} RR.
           </div>
         </div>
       </div>
@@ -3681,7 +3667,6 @@ function SettingsPage() {
     maxRiskPct:   saved0.risk?.maxRiskPct   ?? 1,
     maxDailyLoss: saved0.risk?.maxDailyLoss ?? 3,
     maxPositions: saved0.risk?.maxPositions ?? 5,
-    leverage:     saved0.risk?.leverage     ?? 1,
   });
 
   const [notif, setNotif] = useState({
@@ -4194,14 +4179,8 @@ function SettingsPage() {
                 <span style={{fontSize:10,color:"#94a3b8"}}>%</span>
               </div>
             )}
-            {row("Max Open Positions","Maximum concurrent positions",
+            {row("Max Open Positions","Maximum concurrent paper positions",
               numInput(risk.maxPositions,v=>setRisk(r=>({...r,maxPositions:v})),1,20,1)
-            )}
-            {row("Default Leverage","Leverage multiplier for position sizing",
-              <div style={{display:"flex",alignItems:"center",gap:6}}>
-                {numInput(risk.leverage,v=>setRisk(r=>({...r,leverage:v})),1,100,1)}
-                <span style={{fontSize:10,color:"#94a3b8"}}>x</span>
-              </div>
             )}
           </>
         )}
