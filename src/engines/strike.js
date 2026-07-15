@@ -147,10 +147,16 @@ export function optionsTradePlan({ rec, underlying, mm, riskPct }) {
   const tgtPts = +(slPts * rr).toFixed(2);
   const riskPerLot = slPts * lotUnits;
   const lots = riskPerLot > 0 ? Math.floor(budget / riskPerLot) : 0;
+  // Trailing stop (premium): arms at +trailArmR·R, then trails trailR·R behind the
+  // high-water premium. On by default; the resolver locks in gains once in profit.
+  const trailStop = mm.trailStop !== false;
+  const trailArmR = Number(mm.trailArmR) > 0 ? Number(mm.trailArmR) : 1;
+  const trailR    = Number(mm.trailR)    > 0 ? Number(mm.trailR)    : 1;
   return {
     lotUnits, capital, riskPct, budget, entry, slPts, tgtPts, rr, lots,
     slPrice:  +(entry - slPts).toFixed(2),
     tgtPrice: +(entry + tgtPts).toFixed(2),
+    trailStop, trailArmPts: +(slPts * trailArmR).toFixed(2), trailPts: +(slPts * trailR).toFixed(2),
     riskRs:   lots * riskPerLot,
     rewardRs: lots * tgtPts * lotUnits,
     outlayRs: lots * entry * lotUnits,

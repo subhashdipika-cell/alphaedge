@@ -247,6 +247,17 @@ export async function fetchAutoPaperTrades() {
   } catch (e) { return { ok: false, error: String(e) }; }
 }
 
+// Economic calendar (Forex Factory weekly, fetched server-side by the bridge so
+// the browser skips the flaky CORS-proxy chain). Returns {ok, events[], source}.
+export async function fetchCalendar() {
+  const base = bridgeBaseUrl();
+  if (!base) return { ok: false, error: "no bridge URL" };
+  try {
+    const r = await fetch(base + "/calendar", { signal: AbortSignal.timeout(12000) });
+    return await r.json();
+  } catch (e) { return { ok: false, error: String(e) }; }
+}
+
 // India VIX (live via Dhan, or a collected-ATM-IV percentile proxy off-hours).
 // Returns the bridge payload {ok, source:"dhan"|"proxy", vix?, proxy} or null.
 export async function fetchVix() {

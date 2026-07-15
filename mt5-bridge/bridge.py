@@ -675,6 +675,47 @@ def paper_auto():
         return {"ok": False, "error": f"auto paper read failed: {e}"}
 
 
+_ECON_CAL_CACHE = {"at": 0.0, "data": None}
+def econ_calendar():
+    """Live economic calendar (Forex Factory weekly JSON) fetched server-side so
+    the browser skips the flaky CORS-proxy chain. Covers global/US high-impact
+    events that move Nifty via FII flows (Forex Factory carries no India/INR
+    events). Cached ~30 min; serves stale cache if a refresh fails."""
+    import urllib.request
+    now = time.time()
+    c = _ECON_CAL_CACHE
+    if c["data"] and (now - c["at"] < 1800):
+        return c["data"]
+    events = []
+    for url in ("https://nfs.faireconomy.media/ff_calendar_thisweek.json",):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 AlphaEdge"})
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                arr = json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            continue
+        for it in arr:
+            if not it.get("date") or not it.get("title"):
+                continue
+            imp = str(it.get("impact", "")).lower()
+            events.append({
+                "id":       f"ff{len(events)}",
+                "datetime": it["date"],                 # ISO 8601 with UTC offset
+                "title":    it["title"],
+                "currency": it.get("country", ""),      # FF "country" is already a currency code
+                "impact":   "high" if imp == "high" else "medium" if imp == "medium" else "low",
+                "forecast": it.get("forecast") or "",
+                "previous": it.get("previous") or "",
+                "actual":   it.get("actual") or None,
+            })
+    if not events:
+        return c["data"] or {"ok": False, "error": "calendar feed unreachable"}
+    events.sort(key=lambda e: e["datetime"])
+    data = {"ok": True, "events": events, "source": "forexfactory", "asOf": _ist_now().isoformat()}
+    c["at"], c["data"] = now, data
+    return data
+
+
 def dhan_vix():
     quotes = dhan_index_quotes()
     vix = quotes.get("INDIAVIX") or {}
@@ -730,6 +771,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, rd_replay())
         elif parsed.path.startswith("/paper/auto"):
             self._send(200, paper_auto())
+        elif parsed.path.startswith("/calendar"):
+            self._send(200, econ_calendar())
         elif parsed.path.startswith("/market/holiday"):
             today = _ist_day()
             hols = indian_holidays()

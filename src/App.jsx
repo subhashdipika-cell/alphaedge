@@ -12,7 +12,7 @@ import {
   getDhanToken, setDhanToken, getDhanClientId, setDhanClientId,
   getAnyBridgeUrl, getDhanLastError,
   fetchDhanHistorical, fetchDhanChartCandles, fetchBridgePrices, fetchRealPrices,
-  fetchOptionChain, fetchVix,
+  fetchOptionChain, fetchVix, fetchCalendar,
   getStoredLots, getLotSize, getLotsUpdatedAt, refreshLotSizes,
   getNseHolidayInfo, fetchNseHolidayInfo,
 } from "./data/bridge.js";
@@ -2347,343 +2347,6 @@ function SessionStatusBar() {
   );
 }
 
-// ─── ICT SCREENER — detects high-probability setups from candle data ──────────
-function screenAsset(assetId, livePrice, dayChangePct = null) {
-  // Quick technical screening using price action rules
-  // Returns { signal: true/false, score: 0-100, bias, reasons }
-  //
-  // Momentum/bias comes from TODAY'S real % change (MT5 D1 open / Dhan prev
-  // close, passed in from the live feed). The old version compared livePrice
-  // to the static ASSETS[].base constant — once the market drifted below those
-  // stale anchors it screened BEARISH forever (97 of 99 MT5 trades were sells).
-  const base  = ASSETS.find(a=>a.id===assetId)?.base || livePrice;
-  const drift = ((livePrice - base) / base) * 100; // % from base (fallback only)
-  const momentum = Number.isFinite(dayChangePct) ? dayChangePct : drift;
-
-  let score = 50;
-  const reasons = [];
-
-  // Volatility check — is price moving TODAY? (signal of active market)
-  const absD = Math.abs(momentum);
-  if (absD > 0.3)  { score += 10; reasons.push("Price momentum active"); }
-  if (absD > 0.8)  { score += 10; reasons.push("Strong directional move"); }
-  if (absD > 2.0)  { score += 5;  reasons.push("High volatility"); }
-
-  // Kill zone bonus
-  const utcH = new Date().getUTCHours() + new Date().getUTCMinutes()/60;
-  const KZ = [
-    {s:3.75,e:5,name:"NSE Open KZ"},
-    {s:7,   e:9.5,name:"London KZ"},
-    {s:12,  e:14, name:"NY Open KZ"},
-    {s:0,   e:2,  name:"Asian KZ"},
-  ];
-  const activeKZ = KZ.find(kz=>utcH>=kz.s&&utcH<kz.e);
-  if (activeKZ) { score += 20; reasons.push(`${activeKZ.name} active`); }
-
-  // Session alignment bonus
-  const NSE_OPEN = utcH>=3.75 && utcH<10;
-  if (NSE_OPEN) { score += 10; reasons.push("NSE session"); }
-
-  // Bias from today's momentum. Flat day (<0.1%) = NEUTRAL = no signal —
-  // a coin-flip direction is not a setup.
-  const bias = momentum > 0.1 ? "BULLISH" : momentum < -0.1 ? "BEARISH" : "NEUTRAL";
-
-  return {
-    signal: score >= 70 && bias !== "NEUTRAL",
-    score:  Math.min(score, 95),
-    bias,
-    reasons,
-    activeKZ: activeKZ?.name || null,
-  };
-}
-
-// ─── SIGNAL DE-DUPLICATION ────────────────────────────────────────────────────
-// Stops the SAME setup (asset + bias + entry level) from being fired more than
-// once within a window. Persisted to localStorage so it survives page reloads.
-const SIGNAL_DEDUP_WINDOW_MS = 6 * 60 * 60 * 1000; // 6 hours
-// Fingerprint a signal by asset + direction only (NOT exact price), so the same
-// setup can't fire twice within the window even if the price drifted a little.
-function signalSignature(assetId, bias /* entry intentionally ignored */) {
-  return `${assetId}|${bias}`;
-}
-function isDuplicateSignal(sig) {
-  try {
-    const arr = JSON.parse(localStorage.getItem("alphaedge_recent_sigs") || "[]");
-    const now = Date.now();
-    return arr.some(s => s.sig === sig && (now - s.time) < SIGNAL_DEDUP_WINDOW_MS);
-  } catch { return false; }
-}
-function recordSignalSignature(sig) {
-  try {
-    const now = Date.now();
-    let arr = JSON.parse(localStorage.getItem("alphaedge_recent_sigs") || "[]");
-    arr = arr.filter(s => now - s.time < 24 * 60 * 60 * 1000); // keep last 24h
-    arr.push({ sig, time: now });
-    localStorage.setItem("alphaedge_recent_sigs", JSON.stringify(arr));
-  } catch { /* ignore */ }
-}
-
-// ─── ACTIVE STRATEGIES ────────────────────────────────────────────────────────
-// Strategies the user has backtested and activated from the Backtest page.
-// The auto-signal engine applies an active strategy (per asset) when generating.
-function getActiveStrategies() {
-  try { return JSON.parse(localStorage.getItem("alphaedge_active_strategies") || "[]"); }
-  catch { return []; }
-}
-function addActiveStrategy(entry) {
-  try {
-    const list = getActiveStrategies().filter(s => !(s.id === entry.id && s.assetId === entry.assetId));
-    list.push(entry);
-    localStorage.setItem("alphaedge_active_strategies", JSON.stringify(list));
-  } catch { /* ignore */ }
-}
-function removeActiveStrategy(id, assetId) {
-  try {
-    const list = getActiveStrategies().filter(s => !(s.id === id && s.assetId === assetId));
-    localStorage.setItem("alphaedge_active_strategies", JSON.stringify(list));
-  } catch { /* ignore */ }
-}
-function isStrategyActive(id, assetId) {
-  return getActiveStrategies().some(s => s.id === id && s.assetId === assetId);
-}
-
-// ─── AUTO SIGNAL ENGINE ────────────────────────────────────────────────────────
-// Screens ALL assets every 5 minutes → AI validates → broadcasts if high confidence
-function AutoSignalEngine({ prices, changes, enabled, onSignalSaved }) {
-  const [status,     setStatus]     = useState("idle");
-  const [lastSignal, setLastSignal] = useState(null);
-  const [nextScan,   setNextScan]   = useState(null);
-  const [scanLog,    setScanLog]    = useState([]);
-
-  // Per-asset cooldown: don't re-broadcast same asset within 30 mins
-  const cooldowns = useRef({});
-
-  const hasTelegram = () => getTgToken() && getTgChatId();
-  const hasAI       = () => getGroqKey()||getGeminiKey()||getDeepSeekKey()||getOpenRouterKey();
-
-  const scanAllAssets = async () => {
-    if (!hasTelegram() || !hasAI()) return;
-
-    setStatus("scanning");
-    const log = [];
-
-    for (const assetObj of ASSETS) {
-      const livePrice = prices[assetObj.id] || assetObj.base;
-      const screen    = screenAsset(assetObj.id, livePrice, changes?.[assetObj.id]);
-
-      log.push({ asset: assetObj.label, score: screen.score, signal: screen.signal });
-
-      // Skip if below threshold or in cooldown
-      const cooldownMs = 30 * 60 * 1000; // 30 min per asset
-      const lastTime   = cooldowns.current[assetObj.id] || 0;
-      if (!screen.signal || Date.now() - lastTime < cooldownMs) continue;
-
-      // ── AI Validation ──────────────────────────────────────────────────────
-      setStatus(`validating ${assetObj.label}...`);
-
-      const sym    = "₹";
-      const slPct  = assetObj.id==="BANKNIFTY" ? 0.8 : 0.6;   // BankNifty runs wider intraday ranges
-      const tp1Pct = slPct*1.5, tp2Pct=slPct*3.0;
-      const exEntry= Math.round(livePrice);
-      const exSL   = Math.round(livePrice*(1-(screen.bias==="BULLISH"?slPct:-slPct)/100));
-      const exTP1  = Math.round(livePrice*(1+(screen.bias==="BULLISH"?tp1Pct:-tp1Pct)/100));
-      const exTP2  = Math.round(livePrice*(1+(screen.bias==="BULLISH"?tp2Pct:-tp2Pct)/100));
-      const ruleContext = signalRuleContextForPrompt(assetObj, "Auto", "Auto-Screen");
-      const activeStrat = getActiveStrategies().find(s => s.assetId === assetObj.id);
-      const stratContext = activeStrat
-        ? `\nACTIVE STRATEGY: Apply the user's backtested strategy "${activeStrat.name}" (win rate ${activeStrat.winRate}%, profit factor ${activeStrat.profitFactor}). Use it as the primary setup logic and name it in "setup".\n`
-        : "";
-      const autoWikiCtx = await fetchWikiContext(assetObj.id, "ict");
-      const autoWikiSection = autoWikiCtx
-        ? `\n\n===== TRADER'S WIKI =====\n${autoWikiCtx}\n===== END WIKI =====\n`
-        : "";
-
-      const prompt = `You are an elite ICT/SMC trader validating a trade signal.
-
-Asset: ${assetObj.label}
-Current Live Price: ${sym}${livePrice.toLocaleString(undefined,{maximumFractionDigits:2})}
-Pre-screen bias: ${screen.bias}
-Pre-screen score: ${screen.score}/100
-Reasons: ${screen.reasons.join(", ")}
-Kill Zone: ${screen.activeKZ||"None"}
-${autoWikiSection}
-${stratContext}
-${ruleContext}
-
-TASK: Validate if this is a HIGH PROBABILITY trade. Only approve confidence >= 75.
-All price levels must be realistic and near ${sym}${livePrice.toLocaleString(undefined,{maximumFractionDigits:2})}.
-
-Respond ONLY with this JSON:
-{"approved":true,"confidence":82,"nature":"Intraday","bias":"${screen.bias}","setup":"ICT Order Block + Kill Zone","entry":${exEntry},"stopLoss":${exSL},"takeProfit1":${exTP1},"takeProfit2":${exTP2},"riskReward":3.0,"quadrantPlan":{"smallLoss":"Exit at SL, no averaging down","smallProfit":"TP1/trailing stop only","bigLoss":"Blocked by mandatory SL","bigProfit":"Hold TP2 for 1:3 RR when trend confirms"},"ruleAudit":{"passed":true,"minRR":3,"stopIsMandatory":true,"bigLossBlocked":true},"learningAdjustments":["Applied recent outcome memory"],"ictFactors":["Order Block respected","FVG above unfilled"],"smcFactors":["BOS confirmed"],"macroFactors":["Kill zone momentum"],"killZone":"${screen.activeKZ||"Active Session"}","invalidation":"4H close beyond SL","summary":"Strong ICT confluence validated during kill zone. High probability setup.","riskWarning":"Manage position size appropriately"}
-
-If NOT a high probability trade, set "approved":false and "confidence" below 75.
-JSON only, no markdown:`;
-
-      try {
-        const data   = await callAI(prompt, 900);
-        const raw    = data.content?.[0]?.text || "";
-        const match  = raw.match(/\{[\s\S]*\}/);
-        if (!match) continue;
-        const parsed = JSON.parse(match[0]);
-
-        if (!parsed.approved || (parsed.confidence||0) < 75) continue;
-        const guarded = enforceSignalRules(parsed, { assetObj, livePrice, source:"Auto-Screen" });
-
-        // ── De-dup: skip if this exact setup already fired recently ──────────
-        const sigKey = signalSignature(assetObj.id, guarded.bias, guarded.entry);
-        if (isDuplicateSignal(sigKey)) { log.push({ asset: assetObj.label, skipped:"duplicate" }); continue; }
-
-        // ── Approved! Save to history + broadcast ───────────────────────────
-        cooldowns.current[assetObj.id] = Date.now();
-        recordSignalSignature(sigKey);
-
-        const record = {
-          id:          `AUTO-${Date.now()}`,
-          timestamp:   Date.now(),
-          asset:       assetObj.label,
-          assetId:     assetObj.id,
-          timeframe:   guarded.nature==="Scalping"?"5m": guarded.nature==="Swing"?"4H":"1H",
-          nature:      guarded.nature    || "Intraday",
-          bias:        guarded.bias,
-          confidence:  guarded.confidence,
-          setup:       guarded.setup,
-          entry:       guarded.entry,
-          stopLoss:    guarded.stopLoss,
-          takeProfit1: guarded.takeProfit1,
-          takeProfit2: guarded.takeProfit2,
-          riskReward:  guarded.riskReward,
-          killZone:    guarded.killZone,
-          summary:     guarded.summary,
-          ictFactors:  guarded.ictFactors,
-          smcFactors:  guarded.smcFactors,
-          macroFactors:guarded.macroFactors,
-          invalidation:guarded.invalidation,
-          riskWarning: guarded.riskWarning,
-          quadrantPlan:guarded.quadrantPlan,
-          ruleAudit:   guarded.ruleAudit,
-          learningSnapshot: guarded.learningSnapshot,
-          learningAdjustments: guarded.learningAdjustments,
-          outcome:     "pending",
-          source:      "Auto-Screen",
-          tradeType:   "Paper",
-          session:     marketSession(assetObj.label).session,
-          primeWindow: marketSession(assetObj.label).prime,
-          sessionQuality: marketSession(assetObj.label).quality,
-        };
-        const updated = await appendSignal(record);
-        if (onSignalSaved) onSignalSaved(updated);
-
-        setLastSignal({
-          asset:      assetObj.label,
-          confidence: guarded.confidence,
-          nature:     guarded.nature,
-          bias:       guarded.bias,
-          sent:       true,
-          time:       new Date(),
-        });
-        setStatus("saved");
-        setTimeout(()=>setStatus("idle"), 10000);
-        // Only one signal per scan cycle
-        break;
-
-      } catch { continue; }
-    }
-
-    setScanLog(log);
-    if (status === "scanning" || status.startsWith("validating")) {
-      setStatus("idle");
-    }
-
-    // Schedule next scan in 5 minutes
-    setNextScan(new Date(Date.now() + 5*60*1000));
-  };
-
-  // Run every 5 minutes
-  useEffect(()=>{
-    if (!enabled) { setStatus("idle"); setNextScan(null); return; }
-
-    // First scan after 10s (let prices load), then every 5 min
-    const first = setTimeout(()=>scanAllAssets(), 10000);
-    const interval = setInterval(()=>scanAllAssets(), 5*60*1000);
-    setNextScan(new Date(Date.now() + 10000));
-
-    return ()=>{ clearTimeout(first); clearInterval(interval); };
-  }, [enabled, prices]);
-
-  if (!enabled) return null;
-
-  const minsToNext = nextScan ? Math.max(0, Math.round((nextScan-Date.now())/60000)) : 5;
-  const secsToNext = nextScan ? Math.max(0, Math.round((nextScan-Date.now())/1000)%60) : 0;
-
-  // Floating "Auto-Screen" status box removed per user request — the engine still
-  // runs in the background; strategy control now lives on the Backtest page.
-  return null;
-  /* eslint-disable no-unreachable */
-  return (
-    <div style={{position:"fixed",bottom:16,right:16,zIndex:9999,
-      background:"#0a1628",border:`0.5px solid ${status==="sent"?"#22c55e":"#1e3a5a"}`,
-      borderRadius:10,padding:"10px 14px",minWidth:240,
-      boxShadow:`0 4px 20px rgba(0,0,0,0.6)${status==="sent"?", 0 0 20px #22c55e30":""}`}}>
-      <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6}}>
-        <div style={{width:7,height:7,borderRadius:"50%",flexShrink:0,
-          background:status==="idle"?"#60a5fa":status.startsWith("scan")?"#f59e0b":
-            status.startsWith("valid")?"#a78bfa":status==="sent"?"#22c55e":"#ef4444",
-          boxShadow:`0 0 6px ${status==="sent"?"#22c55e":status.startsWith("valid")?"#a78bfa":"#60a5fa"}`}}/>
-        <span style={{fontSize:10,fontWeight:700,color:"#e2e8f0",fontFamily:"monospace"}}>
-          🤖 Auto-Screen
-        </span>
-        <span style={{fontSize:7,color:"#22c55e",background:"#052e16",
-          padding:"1px 5px",borderRadius:3,marginLeft:"auto",letterSpacing:"0.04em"}}>ACTIVE</span>
-      </div>
-
-      <div style={{fontSize:9,color:"#94a3b8",fontFamily:"monospace",marginBottom:4}}>
-        {status==="idle"           && `⏱ Next scan: ${minsToNext}m ${secsToNext}s`}
-        {status==="scanning"       && "🔍 Screening all assets..."}
-        {status.startsWith("valid")&& `🧠 AI validating ${status.replace("validating ","")}...`}
-        {status==="sent"           && "✅ Signal routed to MT5!"}
-        {status==="validated-nosend"&&"⚠️ Validated · MT5 send failed"}
-      </div>
-
-      {lastSignal&&(
-        <div style={{background:"#060d17",border:"0.5px solid #1e3a5a",borderRadius:6,
-          padding:"5px 8px",marginBottom:4}}>
-          <div style={{fontSize:8,color:"#7c8ea8",marginBottom:2}}>Last signal sent</div>
-          <div style={{fontSize:9,fontWeight:700,
-            color:lastSignal.bias==="BULLISH"?"#22c55e":"#ef4444",fontFamily:"monospace"}}>
-            {lastSignal.nature==="Scalping"?"⚡":lastSignal.nature==="Intraday"?"🕐":"📈"} {lastSignal.asset}
-            {" "}{lastSignal.bias==="BULLISH"?"▲":"▼"} {lastSignal.confidence}%
-          </div>
-          <div style={{fontSize:7,color:"#7c8ea8",marginTop:1,fontFamily:"monospace"}}>
-            {lastSignal.time?.toLocaleString("en-IN",{timeZone:"Asia/Kolkata",
-              hour:"2-digit",minute:"2-digit",hour12:false})} IST
-            {" · "}{lastSignal.sent?"✓ Sent":"✗ Not sent"}
-          </div>
-        </div>
-      )}
-
-      {scanLog.length>0&&(
-        <div>
-          <div style={{fontSize:7,color:"#7c8ea8",marginBottom:3,letterSpacing:"0.06em"}}>LAST SCAN</div>
-          <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
-            {scanLog.map(l=>(
-              <span key={l.asset} style={{fontSize:7,fontFamily:"monospace",
-                padding:"1px 5px",borderRadius:3,
-                color:l.signal?"#22c55e":"#7c8ea8",
-                background:l.signal?"#052e16":"#060d17",
-                border:`0.5px solid ${l.signal?"#22c55e30":"#1e2a3a"}`}}>
-                {l.asset.split("/")[0]} {l.score}
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
-
-      <div style={{fontSize:7,color:"#64748b",marginTop:5,fontFamily:"monospace"}}>
-        Scans every 5min · Broadcasts confidence ≥75
-      </div>
-    </div>
-  );
-}
 // Live discipline cockpit — reads trade history, evaluates guardrails, shows a
 // GREEN/AMBER/RED "clear to trade?" verdict + per-rule status. Serves both the
 // AlphaEdge signal engine and the user's own manual option trading.
@@ -3437,6 +3100,22 @@ const ECON_CALENDAR_FEEDS = [
 // Returns an array on success (and updates the module cache), or null if every
 // source failed — callers then keep showing the last cache / static fallback.
 async function fetchEconEvents() {
+  // 1) Bridge (server-side Forex Factory fetch — reliable, no CORS-proxy roulette).
+  try {
+    const b = await fetchCalendar();
+    if (b?.ok && Array.isArray(b.events) && b.events.length) {
+      const norm = b.events.map((it, i) => ({
+        id: it.id || `b${i}`, datetime: it.datetime, title: it.title,
+        currency: it.currency || "",
+        impact: it.impact === "high" ? "high" : it.impact === "medium" ? "medium" : "low",
+        forecast: it.forecast || "", previous: it.previous || "", actual: it.actual || null,
+      })).sort((a, b) => new Date(a.datetime) - new Date(b.datetime));
+      setLiveEconEvents(norm);
+      return norm;
+    }
+  } catch { /* bridge down — fall through to the direct CORS-proxy path */ }
+
+  // 2) Direct feed via public CORS proxies (fallback when the bridge is down).
   const all = [];
   for (const feed of ECON_CALENDAR_FEEDS) {
     for (const proxy of CORS_PROXIES) {
@@ -4220,13 +3899,13 @@ function SettingsPage() {
             </div>
             {row("Enable guardrails","Master switch for all discipline rules",toggle(guardrails.enabled,v=>setGr({enabled:v})))}
             {guardrails.enabled && (<>
-              {row("Post-loss cooldown (min)","No new entry within N min of a loss — kills revenge trading",
+              {row("Post-loss cooldown (min)","No new entry within N min of a loss — kills revenge trading (0 = off)",
                 numInput(guardrails.cooldownMin,v=>setGr({cooldownMin:v}),0,120,5))}
-              {row("Max trades per day","Hard daily cap — stops over-trading",
-                numInput(guardrails.maxTradesPerDay,v=>setGr({maxTradesPerDay:v}),1,50,1))}
-              {row("Consecutive-loss stop","Stop for the session after N losses in a row",
-                numInput(guardrails.maxConsecLosses,v=>setGr({maxConsecLosses:v}),1,10,1))}
-              {row("Block NSE open","No entries during the volatile 09:15 open",toggle(guardrails.openLockout,v=>setGr({openLockout:v})))}
+              {row("Max trades per day","Hard daily cap — stops over-trading (0 = unlimited)",
+                numInput(guardrails.maxTradesPerDay,v=>setGr({maxTradesPerDay:v}),0,50,1))}
+              {row("Consecutive-loss stop","Stop for the session after N losses in a row (0 = off)",
+                numInput(guardrails.maxConsecLosses,v=>setGr({maxConsecLosses:v}),0,10,1))}
+              {row("Block NSE open","No entries during the volatile 09:15 open (off by default — mechanical policy)",toggle(guardrails.openLockout,v=>setGr({openLockout:v})))}
               {guardrails.openLockout && row("NSE lockout ends (IST)","First entries allowed after this time",
                 <input type="time" value={guardrails.openLockoutEnd} onChange={e=>setGr({openLockoutEnd:e.target.value})}
                   style={{background:"#060d17",border:"0.5px solid #1e3a5a",borderRadius:6,padding:"5px 8px",color:"#e2e8f0",fontSize:12,fontFamily:"monospace"}}/>)}
@@ -5646,14 +5325,6 @@ export default function AlphaEdge() {
   const [activeAsset, setActiveAsset] = useState("NIFTY50");
   const [history, setHistory]     = useState([]);
   const [clock, setClock]         = useState(new Date());
-  const [autoSignalOn, setAutoSignalOn] = useState(
-    localStorage.getItem("alphaedge_autosignal") === "true"
-  );
-  const toggleAutoSignal = () => {
-    const next = !autoSignalOn;
-    setAutoSignalOn(next);
-    localStorage.setItem("alphaedge_autosignal", String(next));
-  };
 
   const [candles, setCandles] = useState(()=>{
     const d={};
@@ -5835,10 +5506,6 @@ export default function AlphaEdge() {
   },[]);
 
   // Called by AISignalPage after saving a new signal
-  const handleSignalSaved = useCallback((updatedHistory)=>{
-    setHistory(updatedHistory);
-  },[]);
-
   // Accept an Option-Score recommendation as a paper trade: snapshot the entry
   // premium + SL/target on the PREMIUM, and record the plan + full factor
   // breakdown. The premium-based resolver (state/paperTrades.js) then tracks it
@@ -5868,6 +5535,9 @@ export default function AlphaEdge() {
       lotSize: result.plan.lotUnits,
       maxHoldMin: result.plan.maxHoldMin,
       squareOff: result.plan.squareOff !== false,
+      trailStop: result.plan.trailStop === true,
+      trailArmPts: result.plan.trailArmPts,
+      trailPts: result.plan.trailPts,
       riskReward: result.plan.rr,
       expiry: result.strike.expiry,
       strike: result.strike.strike,
@@ -5987,32 +5657,6 @@ export default function AlphaEdge() {
           )}
         </div>
 
-        {/* Auto-Signal quick toggle in sidebar */}
-        <div onClick={toggleAutoSignal}
-          style={{margin:"4px 8px",display:"flex",alignItems:"center",gap:8,cursor:"pointer",
-            background:autoSignalOn?"#052e16":"#0d1525",
-            border:`1px solid ${autoSignalOn?"#22c55e80":"#1e3a5a"}`,
-            borderRadius:8,padding:"8px 10px",transition:"all 0.2s",
-            boxShadow:autoSignalOn?"0 0 12px #22c55e25":"none"}}>
-          <span style={{fontSize:16}}>🤖</span>
-          <div style={{flex:1}}>
-            <div style={{fontSize:10,fontWeight:700,color:autoSignalOn?"#22c55e":"#94a3b8",
-              letterSpacing:"0.04em"}}>AUTO SIGNAL</div>
-            <div style={{fontSize:8,color:autoSignalOn?"#16a34a":"#7c8ea8",marginTop:1}}>
-              {autoSignalOn?"Broadcasts during kill zones":"Click to enable"}
-            </div>
-          </div>
-          <div style={{width:32,height:17,borderRadius:9,flexShrink:0,
-            background:autoSignalOn?"#22c55e":"#1e2a3a",
-            border:`1px solid ${autoSignalOn?"#22c55e":"#1e3a5a"}`,
-            position:"relative",transition:"all 0.2s"}}>
-            <div style={{width:13,height:13,borderRadius:"50%",
-              background:autoSignalOn?"white":"#94a3b8",
-              position:"absolute",top:2,left:autoSignalOn?17:2,
-              transition:"left 0.2s"}}/>
-          </div>
-        </div>
-
         {/* User footer */}
         <div style={{padding:"10px 16px"}}>
           <div style={{display:"flex",alignItems:"center",gap:8}}>
@@ -6059,7 +5703,7 @@ export default function AlphaEdge() {
             background: priceSource==="live"?"#052e16": priceSource==="simulated"?"#1c1300":"#0a1628",
             border:`0.5px solid ${priceSource==="live"?"#22c55e30": priceSource==="simulated"?"#f59e0b30":"#1e3a5a"}`}}>
             {priceSource==="live"
-              ? `📡 Live${getDhanToken()?" · Dhan":" · Yahoo"}`
+              ? `📡 Live · ${prices?.NIFTY50?.source || prices?.BANKNIFTY?.source || prices?.SENSEX?.source || "…"}`
               : priceSource==="simulated"?"⚠ Simulated":"⟳ Fetching..."}
           </span>
 
@@ -6067,50 +5711,13 @@ export default function AlphaEdge() {
             {new Date(clock.getTime()+5.5*60*60*1000).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit",hour12:false,timeZone:"UTC"})} IST
           </span>
 
-          {/* Auto-Signal toggle — prominent */}
-          <div onClick={toggleAutoSignal} style={{
-            display:"flex",alignItems:"center",gap:6,cursor:"pointer",
-            background: autoSignalOn
-              ? "linear-gradient(135deg,#052e16,#0a2e1a)"
-              : "#0a1628",
-            border:`1px solid ${autoSignalOn?"#22c55e":"#7c8ea8"}`,
-            borderRadius:7,padding:"4px 10px",transition:"all 0.2s",
-            boxShadow: autoSignalOn?"0 0 10px #22c55e30":"none",
-          }}>
-            <span style={{fontSize:13}}>🤖</span>
-            <div>
-              <div style={{fontSize:9,fontWeight:700,
-                color:autoSignalOn?"#22c55e":"#64748b",
-                letterSpacing:"0.04em",lineHeight:1}}>
-                AUTO SIGNAL
-              </div>
-              <div style={{fontSize:7,color:autoSignalOn?"#16a34a":"#7c8ea8",lineHeight:1.4}}>
-                {autoSignalOn?"● ON — Kill zones":"○ OFF"}
-              </div>
-            </div>
-            {/* Toggle pill */}
-            <div style={{width:28,height:15,borderRadius:8,
-              background:autoSignalOn?"#22c55e":"#1e2a3a",
-              border:`1px solid ${autoSignalOn?"#22c55e":"#1e3a5a"}`,
-              position:"relative",transition:"all 0.2s",flexShrink:0}}>
-              <div style={{width:11,height:11,borderRadius:"50%",
-                background:autoSignalOn?"white":"#94a3b8",
-                position:"absolute",top:2,
-                left:autoSignalOn?15:2,
-                transition:"left 0.2s"}}/>
-            </div>
-          </div>
-
-          <span style={{fontSize:9,color:"#7c8ea8"}}>v2.1 — DeepSeek V4</span>
+          <span style={{fontSize:9,color:"#7c8ea8"}}>v4.0.0 — Index Options</span>
         </div>
 
         {/* Page content */}
         <div style={{flex:1,overflow:"hidden",padding:12}}>
           {pageComponents[page]}
         </div>
-
-        {/* Auto-Signal Engine — runs in background */}
-        <AutoSignalEngine prices={prices} changes={changes} enabled={autoSignalOn} onSignalSaved={handleSignalSaved}/>
 
       </div>
     </div>

@@ -58,7 +58,7 @@ const CFG = {
   underlyings: (opt("underlying", "") ? [opt("underlying", "")] : ASSETS.map(a => a.id)),
 };
 const ENTER_FROM = 9 * 60 + 20;   // no new entries before 09:20 IST (skip the open auction chop)
-const ENTER_TO   = 15 * 60;       // no new entries after 15:00 IST (leave room for the 15:15 square-off)
+const ENTER_TO   = 15 * 60 + 15;  // no new entries after 15:15 IST (matches the 15:15 square-off)
 
 // ── IST helpers (same idiom as src/lib/ist.js — correct on any machine zone) ──
 function istDate() { const n = new Date(); return new Date(n.getTime() + (n.getTimezoneOffset() + 330) * 60000); }
@@ -130,6 +130,7 @@ async function resolveOpen(store) {
       const res = resolvePaperTrade({
         entryTs: t.entryTs || t.timestamp, entryPremium: t.optionPremium, slPremium: t.slPremium, tgtPremium: t.tgtPremium,
         lots: t.lots, lotSize: t.lotSize, maxHoldMin: t.maxHoldMin, squareOff: t.squareOff !== false,
+        trailStop: t.trailStop === true, trailArmPts: t.trailArmPts, trailPts: t.trailPts,
         direction: t.direction, expiry: t.expiry, underlying: t.assetId,
       }, r.series);
       if (res) {
@@ -187,6 +188,7 @@ async function scanOne(store, underlying) {
     stopLoss: r.plan.slPrice, takeProfit1: r.plan.tgtPrice,
     lots: r.plan.lots, lotSize: r.plan.lotUnits,
     maxHoldMin: r.plan.maxHoldMin, squareOff: r.plan.squareOff !== false,
+    trailStop: r.plan.trailStop === true, trailArmPts: r.plan.trailArmPts, trailPts: r.plan.trailPts,
     riskReward: r.plan.rr, expiry: r.strike.expiry, strike: r.strike.strike, direction: r.direction,
     summary: r.report.map(l => `${l.k}: ${l.v}`).join(" · "),
     scoreFactors: Object.fromEntries(Object.entries(r.factors).map(([k, f]) => [k, f.score01])),

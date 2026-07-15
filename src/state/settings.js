@@ -31,6 +31,10 @@ export const MONEY_MGT_DEFAULTS = {
   slPoints: 50,         // fixed stop-loss distance in premium points
   rr: 2,                // reward:risk multiple (1, 1.5, 2, 2.5) or "trail"
   trailMaxRR: 3,        // in "trail" mode, run until this R:R (up to 50)
+  // Trailing stop on the premium (paper resolver) — locks scalp gains once in profit.
+  trailStop: true,      // on by default (testing on paper); false = fixed SL only
+  trailArmR: 1,         // arm the trail once the trade is +1R in premium
+  trailR: 1,            // then trail 1R behind the high-water premium
 };
 export function getMoneyMgt() {
   try { return { ...MONEY_MGT_DEFAULTS, ...JSON.parse(localStorage.getItem("alphaedge_money_mgt") || "{}") }; }

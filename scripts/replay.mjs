@@ -215,6 +215,7 @@ function replayDay({ file, underlying, date }, candleHist) {
         strike: r.strike.strike, direction: r.direction, expiry: chain.expiry,
         optionPremium: entryPrem, entryPremium: entryPrem,
         slPremium: r.plan.slPrice, tgtPremium: r.plan.tgtPrice,
+        trailStop: r.plan.trailStop === true, trailArmPts: r.plan.trailArmPts, trailPts: r.plan.trailPts,
         lots: r.plan.lots, lotSize: r.plan.lotUnits, maxHoldMin: r.plan.maxHoldMin, squareOff: r.plan.squareOff,
         style: r.style?.style, regime: r.regime.regime, score: r.score,
         scoreFactors: Object.fromEntries(Object.entries(r.factors).map(([k, f]) => [k, f.score01])),

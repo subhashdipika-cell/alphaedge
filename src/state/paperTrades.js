@@ -60,6 +60,7 @@ export async function resolveOpenPaperTrades(history = []) {
         tgtPremium: t.tgtPremium ?? t.takeProfit1,
         lots: t.lots, lotSize: t.lotSize,
         maxHoldMin: t.maxHoldMin, squareOff: t.squareOff !== false,
+        trailStop: t.trailStop === true, trailArmPts: t.trailArmPts, trailPts: t.trailPts,
         direction: type, expiry: t.expiry, underlying: t.assetId,
       }, r.series);
       if (res) patches.set(t.id, res);

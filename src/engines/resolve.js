@@ -46,6 +46,15 @@ export function resolvePaperTrade(trade, series) {
   const riskPerUnit = entry - sl;
   const ctx = { entry, riskPerUnit, qty: lots * lotSize, exchange: exchangeFor(trade.underlying || trade.assetId) };
 
+  // Optional trailing stop: once the premium runs `trailArmPts` above entry, a
+  // stop follows the high-water bid by `trailPts`, ratcheting up only (never
+  // down) — locking in a scalp's gains when momentum stalls. Off unless the
+  // trade carries trailStop:true, so trades logged before this keep the fixed SL.
+  const trailOn = trade.trailStop === true && Number(trade.trailPts) > 0;
+  const trailArmPts = Number(trade.trailArmPts) > 0 ? Number(trade.trailArmPts) : riskPerUnit;
+  const trailPts = Number(trade.trailPts) > 0 ? Number(trade.trailPts) : riskPerUnit;
+  let trailArmed = false, trailStopLevel = -Infinity;
+
   let mfe = entry, mae = entry;   // max favourable / adverse premium
   for (const pt of series) {
     const ptMin = hhmmToMin(pt.t);
@@ -56,10 +65,21 @@ export function resolvePaperTrade(trade, series) {
     if (bid < mae) mae = bid;
     const held = ptMin - entryMin;
 
-    const slHit = bid <= sl;
+    // Advance the trailing stop from the high-water mark (arms above entry, so a
+    // trailed exit is always at breakeven-or-better — never a loss once armed).
+    if (trailOn) {
+      if (!trailArmed && bid >= entry + trailArmPts) trailArmed = true;
+      if (trailArmed) trailStopLevel = Math.max(trailStopLevel, +(mfe - trailPts).toFixed(2));
+    }
+    const stop = trailArmed ? Math.max(sl, trailStopLevel) : sl;
+
+    const slHit = bid <= stop;
     const tgtHit = tgt > 0 && bid >= tgt;
     // SL-first: checked before target, so an ambiguous same-minute bar resolves against us.
-    if (slHit) return exit(outcomeOf(sl, entry), sl, pt, "SL hit on premium", { ...ctx, mfe, mae });
+    if (slHit) {
+      const trailed = trailArmed && stop > sl;
+      return exit(outcomeOf(stop, entry), stop, pt, trailed ? "Trailing stop hit" : "SL hit on premium", { ...ctx, mfe, mae });
+    }
     if (tgtHit) return exit(outcomeOf(tgt, entry), tgt, pt, "Target hit on premium", { ...ctx, mfe, mae });
     if (trade.maxHoldMin && held >= trade.maxHoldMin)
       return exit(outcomeOf(ltp, entry), ltp, pt, `Theta time-stop (${trade.maxHoldMin}m)`, { ...ctx, mfe, mae });

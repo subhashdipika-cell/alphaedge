@@ -79,6 +79,41 @@ describe("resolvePaperTrade", () => {
   });
 });
 
+describe("resolvePaperTrade — trailing stop", () => {
+  // entry 100, SL 70, target 160 → 1R = 30 premium points.
+  const trail = { ...baseTrade, trailStop: true, trailArmPts: 30, trailPts: 30 };
+
+  it("locks a gain: arms in profit, exits on the pullback above entry", () => {
+    const series = [pt("09:25", 145), pt("09:40", 112)];   // peaks 145, falls back
+    const r = resolvePaperTrade(trail, series);
+    expect(r.exitReason).toMatch(/Trailing stop/);
+    expect(r.exitPremium).toBe(115);        // 145 high − 30 trail
+    expect(r.outcome).toBe("win");
+  });
+
+  it("trails no lower than breakeven once armed", () => {
+    const series = [pt("09:25", 130), pt("09:40", 95)];    // just arms (+1R), then drops
+    const r = resolvePaperTrade(trail, series);
+    expect(r.exitReason).toMatch(/Trailing stop/);
+    expect(r.exitPremium).toBe(100);        // arm high 130 − 30 = entry (breakeven)
+  });
+
+  it("stays on the fixed SL until the trail arms", () => {
+    const series = [pt("09:25", 120), pt("09:40", 68)];    // never reaches +1R (130)
+    const r = resolvePaperTrade(trail, series);
+    expect(r.exitReason).toMatch(/SL hit/);
+    expect(r.exitPremium).toBe(70);
+    expect(r.outcome).toBe("loss");
+  });
+
+  it("is inert for trades logged without trailStop (backward compatible)", () => {
+    const series = [pt("09:25", 145), pt("09:40", 68)];    // runs up then to fixed SL
+    const r = resolvePaperTrade(baseTrade, series);        // no trailStop field
+    expect(r.exitReason).toMatch(/SL hit/);
+    expect(r.exitPremium).toBe(70);
+  });
+});
+
 describe("isOptionPaperTrade", () => {
   it("matches enriched paper records only", () => {
     expect(isOptionPaperTrade({ tradeType: "Paper", strike: 24000, optionPremium: 100, slPremium: 70 })).toBe(true);

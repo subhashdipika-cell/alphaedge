@@ -3,12 +3,12 @@
 // eventProximity() read that the Option Buying Score's News & Event factor
 // consumes so imminent RBI/CPI/Fed/Budget risk actually gates/penalises trades.
 
-export const ECON_EVENTS_FALLBACK = [
-  {id:9, datetime:"2026-05-19T04:00",title:"RBI Monetary Policy",     currency:"INR",impact:"high",  forecast:"6.25%", previous:"6.50%", actual:null},
-  {id:12,datetime:"2026-05-20T03:30",title:"India CPI y/y",           currency:"INR",impact:"high",  forecast:"4.2%",  previous:"4.6%",  actual:null},
-  {id:14,datetime:"2026-05-20T13:30",title:"US Nonfarm Payrolls",     currency:"USD",impact:"high",  forecast:"185K",  previous:"177K",  actual:null},
-  {id:18,datetime:"2026-05-22T04:00",title:"India GDP Growth Rate",   currency:"INR",impact:"high",  forecast:"7.2%",  previous:"8.4%",  actual:null},
-];
+// Intentionally empty: the calendar is now fed live by the bridge (Forex Factory,
+// server-side — see bridge.py /calendar + App fetchEconEvents). A hardcoded seed
+// only ever went stale and displayed wrong dates/times, so there is no fabricated
+// fallback. When the live feed is unreachable the calendar simply shows no events
+// (and the score's News factor treats that as "no known event", i.e. no penalty).
+export const ECON_EVENTS_FALLBACK = [];
 
 // US events still move Indian indices (Fed → FII flows), so USD maps to them too.
 export const ASSET_IMPACT = {
