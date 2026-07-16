@@ -5,8 +5,9 @@ dist/
 *.log
 .DS_Store
 Thumbs.db
-# scratch commit-message files (git commit -F _commitmsg.txt)
-_*
+# scratch commit-message files at the repo root only (git commit -F _commitmsg.txt).
+# Root-anchored: a bare `_*` also swallowed src/engines/__tests__/ new files.
+/_*
 
 # ── python envs / caches ─────────────────────────────
 .venv/
