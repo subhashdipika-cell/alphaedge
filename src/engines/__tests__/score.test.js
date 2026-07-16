@@ -11,11 +11,17 @@ beforeEach(() => {
 });
 
 // ── candle builders ──
-function trendUp(n = 120, start = 24000, step = 12) {
+// A HEALTHY, joinable uptrend: 100-bar advance into a ~20-bar shallow drift near
+// the EMA, ending below the chain spot so recent structure sits underneath.
+// (The old unbroken vertical ramp is the definition of "chasing" — the level
+// engine's freshness gate now correctly refuses it.)
+function trendUp(n = 120, start = 22850, step = 12) {
   const out = [];
   let px = start;
   for (let i = 0; i < n; i++) {
-    const o = px; px += step + (i % 3 === 0 ? -step * 0.3 : step * 0.2);
+    const late = i >= n - 30;
+    const drift = late ? (i % 2 ? -2 : 4) : step + (i % 3 === 0 ? -step * 0.3 : step * 0.2);
+    const o = px; px += drift;
     const c = px;
     out.push({ open: o, high: Math.max(o, c) + 5, low: Math.min(o, c) - 5, close: c, bull: c >= o, vol: 1000 + i * 5, ts: i * 300000 });
   }

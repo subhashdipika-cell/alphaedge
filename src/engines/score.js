@@ -12,6 +12,7 @@ import { detectRegime } from "./regime.js";
 import { expectedMove, selectStrike, optionsTradePlan } from "./strike.js";
 import { evaluateGuardrails, marketSession } from "./guardrails.js";
 import { selectStyle, styleWeights, STYLE_STRIKE, STYLE_HOLD, getStrikePref } from "./style.js";
+import { buildLevelMap, extensionATR, humanCheck, capTargetToStructure, getLevelsConfig } from "./levels.js";
 
 export const DEFAULT_WEIGHTS = { trend: 20, momentum: 15, ict: 20, chainOi: 15, greeks: 10, ivVix: 10, risk: 5, news: 5 };
 export const SCORE_WEIGHTS_KEY = "alphaedge_score_weights";
@@ -316,6 +317,22 @@ export function scoreOption(inputs) {
   const chosenLeg = pick?.leg || null;
   const factors = scoreDir(direction, chosenLeg);
 
+  // ── Context awareness ("human touch"): level map + freshness + location +
+  // R:R-to-structure. Fixes the three mechanical flaws: chasing spent momentum,
+  // longing into resistance / shorting into support, and targets beyond barriers.
+  const lvlCfg = getLevelsConfig();
+  const levelMap = buildLevelMap({ underlying, candles15m, spot: chain?.under_ltp, oi });
+  const ext = extensionATR(candles5m);
+  // Prospective premium SL (same formula as the plan) → underlying points via delta.
+  const _slPts = chosenLeg ? Math.max(1, Math.min(
+    (mm.useSL && mm.slPoints > 0) ? Number(mm.slPoints) : Math.round(chosenLeg.ltp * 0.30),
+    Math.floor(chosenLeg.ltp))) : 0;
+  const stopUnderPts = _slPts && chosenLeg ? _slPts / (Math.abs(chosenLeg.delta) || 0.5) : 0;
+  const structure = humanCheck({ direction, map: levelMap, stopUnderPts, ext, cfg: lvlCfg });
+  if (lvlCfg.enforce && structure.violations.length) {
+    structure.violations.forEach(v => gates.push(v.reason));
+  }
+
   // ── coverage-capped renormalization ──
   const present = Object.values(factors).filter(f => !f.missing);
   const coverage = Math.round(present.reduce((s, f) => s + f.weight, 0));   // 0..100
@@ -339,16 +356,44 @@ export function scoreOption(inputs) {
     ? { ...optionsTradePlan({ rec: { ltp: chosenLeg.ltp }, underlying, mm, riskPct: riskPct * sizeFactor }),
         maxHoldMin: hold.maxHoldMin, squareOff: hold.squareOff, sizeFactor } : null;
 
+  // Barrier-aware target: the target lives just BEFORE the next barrier, never
+  // beyond it — cap the premium target to the room available to structure.
+  if (plan && structure.headroom != null && chosenLeg) {
+    const cap = capTargetToStructure({
+      entry: plan.entry, slPts: plan.slPts, tgtPts: plan.tgtPts,
+      delta: chosenLeg.delta, headroom: structure.headroom,
+    });
+    if (cap) {
+      Object.assign(plan, { tgtPts: cap.tgtPts, tgtPrice: cap.tgtPrice, rr: cap.rr,
+        rewardRs: +(plan.lots * cap.tgtPts * plan.lotUnits).toFixed(2), tgtCapped: true });
+      structure.tgtCapped = true;
+    }
+  }
+
   const styleReasons = [...styleSel.reasons];
   if (zeroDteScalp) styleReasons.push("0-DTE scalp — half size + 15-min hard time-stop");
   const styleInfo = { style, label: styleSel.label, hold: hold.label, reasons: styleReasons, alternatives: styleSel.alternatives || [], zeroDteScalp };
 
   // ── decision report (the explainable output) ──
   const report = buildReport({ underlying, direction, verdict, score, regime, styleInfo, factors, pick, chosenLeg, chain, oi, vix, em, plan, why, gates });
+  if (levelMap.ok) {
+    const nb = { r: structure.barrier, sup: levelMap.supports.at(-1), res: levelMap.resistances[0] };
+    report.push({
+      k: "Structure",
+      v: `Sup ${nb.sup ? nb.sup.price : "—"} · Res ${nb.res ? nb.res.price : "—"}`
+        + (structure.rrStructure != null ? ` · room ${structure.rrStructure}R` : "")
+        + (structure.tgtCapped ? " · target capped to structure" : ""),
+      tone: structure.violations.length ? "warn" : "good",
+    });
+    if (structure.extension != null) {
+      report.push({ k: "Freshness", v: `${structure.extension >= 0 ? "+" : ""}${structure.extension}×ATR from 5m mean`,
+        tone: Math.abs(structure.extension) > lvlCfg.extMaxATR ? "warn" : "good" });
+    }
+  }
 
   return {
     ok: true, underlying, direction: verdict === "NO_TRADE" ? "NO_TRADE" : direction,
-    verdict, score, coverage, why, gates,
+    verdict, score, coverage, why, gates, structure,
     regime, style: styleInfo, factors, weights,
     strike: chosenLeg ? { strike: chosenLeg.strike, moneyness: pick?.moneyness, ltp: chosenLeg.ltp,
                           delta: chosenLeg.delta, theta: chosenLeg.theta, iv: chosenLeg.iv,

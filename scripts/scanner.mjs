@@ -192,6 +192,12 @@ async function scanOne(store, underlying) {
     riskReward: r.plan.rr, expiry: r.strike.expiry, strike: r.strike.strike, direction: r.direction,
     summary: r.report.map(l => `${l.k}: ${l.v}`).join(" · "),
     scoreFactors: Object.fromEntries(Object.entries(r.factors).map(([k, f]) => [k, f.score01])),
+    structure: r.structure ? {
+      rrStructure: r.structure.rrStructure, extension: r.structure.extension,
+      barrier: r.structure.barrier?.price ?? null,
+      violations: (r.structure.violations || []).map(v => v.code),
+      tgtCapped: !!r.structure.tgtCapped,
+    } : null,
     regime: r.regime.regime, style: r.style?.style,
     outcome: "pending", source: "Auto-Scan", tradeType: "Paper",
   };

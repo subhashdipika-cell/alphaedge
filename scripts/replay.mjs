@@ -219,6 +219,8 @@ function replayDay({ file, underlying, date }, candleHist) {
         lots: r.plan.lots, lotSize: r.plan.lotUnits, maxHoldMin: r.plan.maxHoldMin, squareOff: r.plan.squareOff,
         style: r.style?.style, regime: r.regime.regime, score: r.score,
         scoreFactors: Object.fromEntries(Object.entries(r.factors).map(([k, f]) => [k, f.score01])),
+        structure: r.structure ? { rrStructure: r.structure.rrStructure, extension: r.structure.extension,
+          violations: (r.structure.violations || []).map(v => v.code), tgtCapped: !!r.structure.tgtCapped } : null,
       };
     }
   }

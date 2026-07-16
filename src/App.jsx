@@ -5549,6 +5549,14 @@ export default function AlphaEdge() {
       direction: result.direction,
       summary: result.report.map(l=>`${l.k}: ${l.v}`).join(" · "),
       scoreFactors: Object.fromEntries(Object.entries(result.factors).map(([k,f])=>[k, f.score01])),
+      // Context features (level engine) — logged for the R&D "which features
+      // separate winners from losers" analysis.
+      structure: result.structure ? {
+        rrStructure: result.structure.rrStructure, extension: result.structure.extension,
+        barrier: result.structure.barrier?.price ?? null,
+        violations: (result.structure.violations||[]).map(v=>v.code),
+        tgtCapped: !!result.structure.tgtCapped,
+      } : null,
       regime: result.regime.regime,
       style: result.style?.style,
       outcome: "pending",
