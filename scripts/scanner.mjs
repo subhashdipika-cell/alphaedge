@@ -59,6 +59,7 @@ const CFG = {
 };
 const ENTER_FROM = 9 * 60 + 20;   // no new entries before 09:20 IST (skip the open auction chop)
 const ENTER_TO   = 15 * 60 + 15;  // no new entries after 15:15 IST (matches the 15:15 square-off)
+const hhmm = (m) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
 
 // ── IST helpers (same idiom as src/lib/ist.js — correct on any machine zone) ──
 function istDate() { const n = new Date(); return new Date(n.getTime() + (n.getTimezoneOffset() + 330) * 60000); }
@@ -217,7 +218,7 @@ async function tick() {
 
   if (!trading) {
     saveStore(store);
-    const why = mins < ENTER_FROM ? "pre-open" : mins > ENTER_TO ? "past 15:00 entry cutoff" : "not a trading day";
+    const why = mins < ENTER_FROM ? "pre-open" : mins > ENTER_TO ? `past ${hhmm(ENTER_TO)} entry cutoff` : "not a trading day";
     log(`idle (${why}) · resolved ${resolved} · open ${store.summary.open}`);
     return store.summary;
   }
@@ -241,7 +242,7 @@ async function main() {
   console.log(` indices  ${CFG.underlyings.join(", ")}`);
   console.log(` cycle    ${CFG.intervalMs / 1000}s · capital ₹${CFG.capital.toLocaleString("en-IN")} · risk ${CFG.risk}%/trade`);
   console.log(` store    ${STORE}`);
-  console.log(" PAPER ONLY — no broker orders. Entries 09:20–15:00 IST; resolves to 15:15 square-off.");
+  console.log(` PAPER ONLY — no broker orders. Entries ${hhmm(ENTER_FROM)}–${hhmm(ENTER_TO)} IST; 15:15 square-off.`);
   console.log("─".repeat(72));
 
   // Fail loudly if the bridge isn't up — the scanner is useless without it.
