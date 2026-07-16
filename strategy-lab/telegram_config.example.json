@@ -1,0 +1,5 @@
+{
+  "_comment": "Copy to telegram_config.json (gitignored) so the HEADLESS SCANNER can send paper open/close alerts. Use the same bot token + chat id you set in the app's Settings → Telegram.",
+  "token": "PASTE_BOT_TOKEN",
+  "chat_id": "PASTE_CHAT_ID"
+}

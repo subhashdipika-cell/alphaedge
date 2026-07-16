@@ -32,6 +32,27 @@ if (process.env.BRIDGE_URL) {
   globalThis.localStorage.setItem("alphaedge_settings", JSON.stringify({ broker: { bridgeUrl: process.env.BRIDGE_URL } }));
 }
 
+// Telegram creds for the shared alert module (browser reads them from Settings;
+// the scanner mirrors them from env or strategy-lab/telegram_config.json).
+{
+  const fsMod = await import("fs");
+  const pathMod = await import("path");
+  const urlMod = await import("url");
+  const here = pathMod.dirname(urlMod.fileURLToPath(import.meta.url));
+  let tgToken = process.env.TG_BOT_TOKEN || "", tgChat = process.env.TG_CHAT_ID || "";
+  if (!tgToken || !tgChat) {
+    try {
+      const cfg = JSON.parse(fsMod.readFileSync(pathMod.join(here, "..", "strategy-lab", "telegram_config.json"), "utf8"));
+      tgToken = tgToken || cfg.token || cfg.bot_token || "";
+      tgChat = tgChat || cfg.chat_id || cfg.chatId || "";
+    } catch { /* not configured — alerts silently off */ }
+  }
+  if (tgToken && tgChat) {
+    globalThis.localStorage.setItem("alphaedge_tg_token", tgToken);
+    globalThis.localStorage.setItem("alphaedge_tg_chat", tgChat);
+  }
+}
+
 const { ASSETS } = await import("../src/data/constants.js");
 const { fetchScoreInputs, fetchPremiumSeries, bridgeBaseUrl } = await import("../src/data/bridge.js");
 const { analyzeOiTrend } = await import("../src/engines/oi.js");
@@ -39,6 +60,7 @@ const { scoreOption } = await import("../src/engines/score.js");
 const { resolvePaperTrade, entryTsToUtc } = await import("../src/engines/resolve.js");
 const { getMoneyMgt, getRiskPolicy } = await import("../src/state/settings.js");
 const { eventProximity } = await import("../src/data/events.js");
+const { sendPaperOpenAlert, sendPaperCloseAlert, tgConfigured } = await import("../src/data/telegram.js");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -138,6 +160,7 @@ async function resolveOpen(store) {
         Object.assign(t, res);
         changed++;
         log(`resolved ${t.assetId} ${t.strike}${t.direction} → ${String(res.outcome).toUpperCase()} ${inr(res.pnlRs)} (${res.exitReason})`);
+        sendPaperCloseAlert(t);   // Telegram on the actual close (fire-and-forget)
       }
     } catch { /* premium offline — retry next cycle */ }
   }
@@ -204,6 +227,7 @@ async function scanOne(store, underlying) {
   };
   store.trades.push(record);
   log(`OPENED ${underlying} ${r.strike.strike}${r.direction} @ ₹${r.strike.ltp} · ${r.style?.style} · score ${r.score} · ${r.plan.lots}×${r.plan.lotUnits} lots · SL ₹${r.plan.slPrice} TGT ₹${r.plan.tgtPrice}`);
+  sendPaperOpenAlert(record);   // Telegram on the actual open (fire-and-forget)
   return { underlying, note: `TRADE(${r.score})→${r.strike.strike}${r.direction}` };
 }
 
@@ -243,6 +267,7 @@ async function main() {
   console.log(` cycle    ${CFG.intervalMs / 1000}s · capital ₹${CFG.capital.toLocaleString("en-IN")} · risk ${CFG.risk}%/trade`);
   console.log(` store    ${STORE}`);
   console.log(` PAPER ONLY — no broker orders. Entries ${hhmm(ENTER_FROM)}–${hhmm(ENTER_TO)} IST; 15:15 square-off.`);
+  console.log(` telegram ${tgConfigured() ? "ON — alerts on paper open/close" : "off (set TG_BOT_TOKEN/TG_CHAT_ID or strategy-lab/telegram_config.json)"}`);
   console.log("─".repeat(72));
 
   // Fail loudly if the bridge isn't up — the scanner is useless without it.

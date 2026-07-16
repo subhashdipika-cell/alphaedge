@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { loadHistory, saveHistory } from "../state/history.js";
 import { getOptionPaperTrades, openPaperTrades, paperTradeStats, resolveOpenPaperTrades } from "../state/paperTrades.js";
 import { fetchPremiumSeries, fetchAutoPaperTrades } from "../data/bridge.js";
+import { sendPaperCloseAlert } from "../data/telegram.js";
 import { entryTsToUtc } from "../engines/resolve.js";
 import { netOptionPnl, exchangeFor } from "../engines/costs.js";
 
@@ -96,13 +97,15 @@ export default function PaperTradesPage() {
     if (!window.confirm(`Close ${t.strike}${t.direction} manually? Marked at the last premium, net of costs.`)) return;
     const p = livePrem[t.id] ?? t.optionPremium;
     const { grossRs, costRs, netRs } = netOptionPnl({ entryPremium: t.optionPremium || t.entry, exitPremium: p, qty: (t.lots || 0) * (t.lotSize || 0), exchange: exchangeFor(t.assetId) });
-    const next = (await loadHistory()).map(s => s.id === t.id ? {
-      ...s, outcome: netRs >= 0 ? "win" : "loss", exitPremium: +Number(p).toFixed(2),
+    const patch = {
+      outcome: netRs >= 0 ? "win" : "loss", exitPremium: +Number(p).toFixed(2),
       pnlRs: netRs, grossPnlRs: grossRs, costRs,
       rMultiple: (t.optionPremium - t.slPremium) ? +((p - t.optionPremium) / (t.optionPremium - t.slPremium)).toFixed(2) : 0,
       exitReason: "Manual close", resolvedBy: "manual", resolvedAt: Date.now(),
-    } : s);
+    };
+    const next = (await loadHistory()).map(s => s.id === t.id ? { ...s, ...patch } : s);
     await saveHistory(next); setHistory(next);
+    sendPaperCloseAlert({ ...t, ...patch });   // Telegram on the actual close
   };
 
   return (

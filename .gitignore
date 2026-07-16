@@ -32,5 +32,6 @@ strategy-lab/dhan_scrip_master.csv
 # secrets backups + oversized binaries
 strategy-lab/dhan_config.json*
 !strategy-lab/dhan_config.example.json
+strategy-lab/telegram_config.json
 build_assets.zip
 installer_output/

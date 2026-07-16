@@ -16,6 +16,7 @@ import {
   getStoredLots, getLotSize, getLotsUpdatedAt, refreshLotSizes,
   getNseHolidayInfo, fetchNseHolidayInfo,
 } from "./data/bridge.js";
+import { sendPaperOpenAlert } from "./data/telegram.js";
 import {
   detectSwings, detectFVGs, detectOrderBlocks, detectBOS,
   detectLiquidity, detectMSLabels, detectPD, calcEMAs, calcRSI,
@@ -5566,6 +5567,7 @@ export default function AlphaEdge() {
     };
     const updated = await appendSignal(record);
     setHistory(updated);
+    sendPaperOpenAlert(record);   // Telegram on the actual open (fire-and-forget)
     setPage(3);   // jump to the Paper Trades blotter
   },[]);
 

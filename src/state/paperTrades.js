@@ -5,8 +5,13 @@
 // bridge /dhan/premium series.
 
 import { fetchPremiumSeries } from "../data/bridge.js";
+import { sendPaperCloseAlert } from "../data/telegram.js";
 import { isOptionPaperTrade, resolvePaperTrade, entryTsToUtc } from "../engines/resolve.js";
 import { istDayKey } from "../lib/ist.js";
+
+// Trade ids already alerted this session (the resolver can be polled from
+// several places — App poller, Paper Trades page — one alert per close).
+const _closeAlerted = new Set();
 
 export function getOptionPaperTrades(history = []) {
   return history.filter(isOptionPaperTrade);
@@ -63,7 +68,14 @@ export async function resolveOpenPaperTrades(history = []) {
         trailStop: t.trailStop === true, trailArmPts: t.trailArmPts, trailPts: t.trailPts,
         direction: type, expiry: t.expiry, underlying: t.assetId,
       }, r.series);
-      if (res) patches.set(t.id, res);
+      if (res) {
+        patches.set(t.id, res);
+        // Telegram on the actual close (win/loss only; once per trade).
+        if (!_closeAlerted.has(t.id) && (res.outcome === "win" || res.outcome === "loss")) {
+          _closeAlerted.add(t.id);
+          sendPaperCloseAlert({ ...t, ...res });
+        }
+      }
     } catch { /* bridge/premium offline — retry next tick */ }
   }
 
