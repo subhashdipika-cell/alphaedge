@@ -313,7 +313,12 @@ export function scoreOption(inputs) {
 
   // Select strike for the winning direction (style-specific delta band), then
   // finalize with greeks.
-  const pick = selectStrike({ chain, direction, minPremium: minPrem, expected: em, strikePref });
+  // Affordability-aware: the ₹ risk budget for THIS trade (0-DTE scalps are
+  // half-size), so selectStrike can step to a cheaper in-band strike when one
+  // lot of the ideal strike would bust the budget (indivisible-lot problem).
+  const riskBudget = (Number(mm.capital) || 0) * ((riskPct * sizeFactor) / 100);
+  const pick = selectStrike({ chain, direction, minPremium: minPrem, expected: em, strikePref,
+                              budget: riskBudget, underlying, mm });
   const chosenLeg = pick?.leg || null;
   const factors = scoreDir(direction, chosenLeg);
 

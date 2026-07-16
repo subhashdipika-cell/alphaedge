@@ -91,8 +91,18 @@ export function expectedMove(chain, dteYears = null) {
 // Dynamic strike selection for a direction. Prefers |delta| in the style's band
 // (default [0.45,0.65]; swing skews ITM), ranks by closeness to the style's ideal
 // delta, then tight spread, then OI; rejects premium below the floor.
-// Returns { leg, moneyness, reasons } or null.
-export function selectStrike({ chain, direction, minPremium = 40, expected = null, strikePref = null }) {
+//
+// Affordability-aware: when `budget` (₹ risk allowed for the trade) is given and
+// the ideal-delta strike can't fit ONE lot inside it (indivisible lots — e.g. a
+// ₹216 slightly-ITM NIFTY PE risks ₹4,225/lot vs a ₹4,000 1% budget), it steps
+// to a cheaper strike STILL INSIDE the delta band that does fit, instead of
+// skipping a TRADE-grade setup over a few hundred rupees. Risk discipline is
+// kept; the instrument adapts. If nothing in the pool fits, the ideal pick is
+// returned unchanged (flagged `unaffordable`) so the caller sizes it to 0 lots
+// and reports honestly.
+// Returns { leg, moneyness, reasons, unaffordable? } or null.
+export function selectStrike({ chain, direction, minPremium = 40, expected = null, strikePref = null,
+                               budget = null, underlying = null, mm = {} }) {
   if (!chain?.strikes?.length) return null;
   const deltaLo = strikePref?.deltaLo ?? 0.45;
   const deltaHi = strikePref?.deltaHi ?? 0.65;
@@ -113,7 +123,22 @@ export function selectStrike({ chain, direction, minPremium = 40, expected = nul
     Math.abs(a.adelta - ideal) - Math.abs(b.adelta - ideal) ||
     a.spreadPct - b.spreadPct ||
     b.oi - a.oi);
-  const leg = pool[0];
+  let leg = pool[0];
+
+  // ── Affordability walk (same SL formula as optionsTradePlan) ──
+  const lotUnits = underlying ? getLotSize(underlying) : 0;
+  const riskPerLot = (l) => {
+    let slPts = (mm.useSL && mm.slPoints > 0) ? Number(mm.slPoints) : Math.round(l.ltp * 0.30);
+    slPts = Math.max(1, Math.min(slPts, Math.floor(l.ltp)));
+    return slPts * lotUnits;
+  };
+  const checkBudget = budget > 0 && lotUnits > 0;
+  let stepped = null, unaffordable = false;
+  if (checkBudget && riskPerLot(leg) > budget) {
+    const fits = pool.filter(l => riskPerLot(l) <= budget);
+    if (fits.length) { stepped = leg; leg = fits[0]; }   // fits[] keeps the pool's ranking
+    else unaffordable = true;                            // honest: nothing fits — caller sizes 0 lots
+  }
 
   // Moneyness relative to spot (CE ITM below spot; PE ITM above spot).
   let moneyness = "ATM";
@@ -126,9 +151,13 @@ export function selectStrike({ chain, direction, minPremium = 40, expected = nul
   }
   const reasons = [];
   reasons.push(`Delta ${leg.delta.toFixed(2)} (${moneyness}) — ${leg.adelta >= deltaLo && leg.adelta <= deltaHi ? `in the ${deltaLo}–${deltaHi} band` : `closest available to ${ideal}`}`);
+  if (stepped) reasons.push(
+    `Ideal Δ${stepped.adelta.toFixed(2)} strike ${stepped.strike} (₹${stepped.ltp}) risks ₹${riskPerLot(stepped).toLocaleString("en-IN")}/lot — over the ₹${Math.round(budget).toLocaleString("en-IN")} budget; stepped to this affordable strike (₹${riskPerLot(leg).toLocaleString("en-IN")}/lot)`);
+  if (unaffordable) reasons.push(
+    `No strike in the pool fits ₹${Math.round(budget).toLocaleString("en-IN")} risk/lot — raise capital/risk or wait for cheaper premium`);
   if (leg.spreadPct) reasons.push(`Spread ${(leg.spreadPct * 100).toFixed(1)}% of premium`);
   reasons.push(`Premium ₹${leg.ltp} · OI ${leg.oi.toLocaleString("en-IN")}`);
-  return { leg, moneyness, reasons };
+  return { leg, moneyness, reasons, ...(unaffordable ? { unaffordable: true } : {}) };
 }
 
 // Position plan for a chosen option leg, sized from Money Mgt (capital + RR + SL)
