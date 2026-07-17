@@ -79,6 +79,13 @@ def build_oitrend(underlying, bucket_min=5, max_points=80):
     if not rows:
         return {"ok": False, "error": "CSV is empty"}
 
+    # Expiry-day files carry TWO expiries (the expiring front chain + the next
+    # one the scoring stack rolls to). OI analysis targets the FRONT expiry —
+    # mixing both would double-count per-strike OI.
+    _exps = sorted({r.get("expiry", "") for r in rows if r.get("expiry")})
+    if len(_exps) > 1:
+        rows = [r for r in rows if r.get("expiry") == _exps[0]]
+
     # Group rows by snapshot timestamp (preserve first-seen order = chronological).
     snaps = {}
     order = []

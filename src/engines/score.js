@@ -381,6 +381,9 @@ export function scoreOption(inputs) {
 
   // ── decision report (the explainable output) ──
   const report = buildReport({ underlying, direction, verdict, score, regime, styleInfo, factors, pick, chosenLeg, chain, oi, vix, em, plan, why, gates });
+  if (chain?.rolledFromExpiry) {
+    report.push({ k: "Expiry", v: `Expiry day (${chain.rolledFromExpiry.slice(5)}) — rolled to next expiry ${String(chain.expiry || "").slice(5)}, no 0-DTE buying`, tone: "good" });
+  }
   if (levelMap.ok) {
     const nb = { r: structure.barrier, sup: levelMap.supports.at(-1), res: levelMap.resistances[0] };
     report.push({

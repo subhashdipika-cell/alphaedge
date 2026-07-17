@@ -112,6 +112,22 @@ def _is_throttle(err) -> bool:
     return any(k in s for k in ("rate", "limit", "too many", "904", "throttl"))
 
 
+def future_expiries(dhan, meta) -> list[str]:
+    """Sorted future expiry dates for an underlying (today's expiry included)."""
+    resp = dhan.expiry_list(meta["id"], meta["seg"])
+    d = _unwrap(resp)
+    if "_error" in d:
+        log(f"  expiry_list failed: {d['_error']}"); return []
+    exps = d.get("data") or (resp.get("data") if isinstance(resp.get("data"), list) else None)
+    if not exps:
+        exps = resp.get("data", {}).get("data") if isinstance(resp.get("data"), dict) else None
+    if not exps:
+        return []
+    today = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=5, minutes=30))).strftime("%Y-%m-%d")
+    future = sorted(str(e) for e in exps if str(e) >= today)
+    return future or sorted(str(e) for e in exps)
+
+
 def nearest_expiry(dhan, meta) -> str | None:
     resp = dhan.expiry_list(meta["id"], meta["seg"])
     d = _unwrap(resp)
@@ -203,31 +219,48 @@ def main():
 
     dhan = build_client()
     log(f"=== Options collector starting (ATM +/- {args.range} strikes) ===")
-    expiries = {}
+    expiries: dict[str, list[str]] = {}
     for name, meta in UNDERLYINGS.items():
-        expiries[name] = nearest_expiry(dhan, meta)
-        log(f"  {name}: nearest expiry {expiries[name]}")
+        expiries[name] = future_expiries(dhan, meta)
+        log(f"  {name}: nearest expiry {expiries[name][0] if expiries[name] else '?'}")
         time.sleep(RATE_LIMIT_SEC)
+
+    def _today() -> str:
+        return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=5, minutes=30))).strftime("%Y-%m-%d")
 
     while True:
         if not indian_market_open() and not args.once:
             log("Market closed — sleeping 5 min.")
             time.sleep(300)
             continue
+        today = _today()
         for name, meta in UNDERLYINGS.items():
-            exp = expiries.get(name)
-            if not exp:
-                expiries[name] = exp = nearest_expiry(dhan, meta)
+            exps = expiries.get(name) or []
+            # Refresh when unknown or stale (front expiry already in the past —
+            # happens when the collector runs across an expiry into the next day).
+            if not exps or exps[0] < today:
+                expiries[name] = exps = future_expiries(dhan, meta)
                 time.sleep(RATE_LIMIT_SEC)
-            if not exp:
+            if not exps:
                 continue
             try:
-                n = snapshot(dhan, name, meta, exp, args.range)
+                n = snapshot(dhan, name, meta, exps[0], args.range)
                 if n:
-                    log(f"  {name} {exp}: +{n} legs -> {csv_path(name).name}")
+                    log(f"  {name} {exps[0]}: +{n} legs -> {csv_path(name).name}")
             except Exception as e:
                 log(f"  {name}: snapshot error: {e}")
             time.sleep(RATE_LIMIT_SEC)   # respect option-chain rate limit
+            # Expiry day: ALSO collect the next expiry — the scoring stack rolls
+            # to it (no 0-DTE buying), so its premium history must exist for
+            # paper-trade resolution. Same file; consumers filter by expiry.
+            if exps[0] == today and len(exps) > 1:
+                try:
+                    n2 = snapshot(dhan, name, meta, exps[1], args.range)
+                    if n2:
+                        log(f"  {name} {exps[1]} (next, expiry-day roll): +{n2} legs")
+                except Exception as e:
+                    log(f"  {name}: next-expiry snapshot error: {e}")
+                time.sleep(RATE_LIMIT_SEC)
         if args.once:
             break
         time.sleep(POLL_SECONDS)

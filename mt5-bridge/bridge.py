@@ -238,6 +238,10 @@ def _optionchain_from_csv(under_name, rng):
             return None
         last_ts = rows[-1]["time"]
         snap = [r for r in rows if r["time"] == last_ts]
+        # Expiry-day files carry two expiries (front + next) — serve the front.
+        _exps = sorted({r.get("expiry", "") for r in snap if r.get("expiry")})
+        if len(_exps) > 1:
+            snap = [r for r in snap if r.get("expiry") == _exps[0]]
         under = float(snap[0].get("under_ltp") or 0)
         expiry = snap[0].get("expiry", "")
         by_strike = {}

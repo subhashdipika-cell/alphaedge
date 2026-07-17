@@ -317,6 +317,12 @@ async function scoreCandles(underlying, tf, days) {
 // One-shot pull of everything the Option Buying Score engine needs for one
 // underlying: option chain, OI trend, VIX, and 5m/15m/1H candles. Returns
 // { chain, oiTrend, vix, candles5m, candles15m, candles1H } (candles in app shape).
+//
+// Expiry-day roll: when the nearest chain expires TODAY (and the caller didn't
+// force an expiry), the tradeable chain is re-fetched for the NEXT expiry — we
+// buy next-expiry options instead of fighting the 0-DTE theta cliff. The OI
+// trend stays on the front (expiring) chain: its walls/max-pain still describe
+// today's pinning; next-expiry OI is too thin to read.
 export async function fetchScoreInputs(underlying, range = 8, expiry = null) {
   const [chain, oiTrend, vix, candles5m, candles15m, candles1H] = await Promise.all([
     fetchOptionChain(underlying, range, expiry),
@@ -326,7 +332,18 @@ export async function fetchScoreInputs(underlying, range = 8, expiry = null) {
     scoreCandles(underlying, "15m", 10),
     scoreCandles(underlying, "1H", 12),
   ]);
-  return { chain, oiTrend, vix, candles5m, candles15m, candles1H };
+  let outChain = chain;
+  if (!expiry && chain?.ok && chain.isExpiryToday && Array.isArray(chain.expiries)) {
+    const next = chain.expiries.find(e => e > chain.expiry);
+    if (next) {
+      const rolled = await fetchOptionChain(underlying, range, next);
+      if (rolled?.ok && rolled.strikes?.length) {
+        rolled.rolledFromExpiry = chain.expiry;   // annotate for the report/UI
+        outChain = rolled;
+      }
+    }
+  }
+  return { chain: outChain, oiTrend, vix, candles5m, candles15m, candles1H };
 }
 
 // ─── Lot sizes ────────────────────────────────────────────────────────────────

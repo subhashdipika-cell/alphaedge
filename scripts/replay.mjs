@@ -172,8 +172,13 @@ function dayFiles(underlying) {
 }
 
 function replayDay({ file, underlying, date }, candleHist) {
-  const rows = readCsv(path.join(OPT_DIR, file));
+  let rows = readCsv(path.join(OPT_DIR, file));
   if (!rows.length) return [];
+  // Expiry-day files carry two expiries (front + the next one the live stack
+  // rolls to). Replay stays on the FRONT chain so history remains single-chain
+  // and comparable across days.
+  const exps = [...new Set(rows.map(r => r.expiry).filter(Boolean))].sort();
+  if (exps.length > 1) rows = rows.filter(r => r.expiry === exps[0]);
   const snaps = snapshots(rows);
   const isExpiryToday = snaps[0].legs[0].expiry === date;
   snaps.forEach(s => (s._isExpiryToday = isExpiryToday));
