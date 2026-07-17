@@ -224,6 +224,7 @@ async function scanOne(store, underlying) {
       slBasis: r.structure.slBasis ?? "pct", slLevel: r.structure.slLevel ?? null,
     } : null,
     regime: r.regime.regime, style: r.style?.style,
+    priorDay: r.regime.priorDay ? { dayType: r.regime.priorDay.dayType, gapPct: r.regime.priorDay.gapPct, closePos: r.regime.priorDay.closePos } : null,
     outcome: "pending", source: "Auto-Scan", tradeType: "Paper",
   };
   store.trades.push(record);

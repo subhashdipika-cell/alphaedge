@@ -5560,6 +5560,10 @@ export default function AlphaEdge() {
         slBasis: result.structure.slBasis ?? "pct", slLevel: result.structure.slLevel ?? null,
       } : null,
       regime: result.regime.regime,
+      priorDay: result.regime.priorDay ? {
+        dayType: result.regime.priorDay.dayType, gapPct: result.regime.priorDay.gapPct,
+        closePos: result.regime.priorDay.closePos,
+      } : null,
       style: result.style?.style,
       outcome: "pending",
       source: "Option Score",

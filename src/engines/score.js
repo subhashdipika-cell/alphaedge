@@ -393,6 +393,15 @@ export function scoreOption(inputs) {
   if (chain?.rolledFromExpiry) {
     report.push({ k: "Expiry", v: `Expiry day (${chain.rolledFromExpiry.slice(5)}) — rolled to next expiry ${String(chain.expiry || "").slice(5)}, no 0-DTE buying`, tone: "good" });
   }
+  if (regime.priorDay) {
+    const pd = regime.priorDay;
+    report.push({
+      k: "Prior day",
+      v: `${pd.dayType.replace("_", " ").toLowerCase()} · close ${pd.strongClose === "high" ? "strong (at highs)" : pd.strongClose === "low" ? "weak (at lows)" : "mid-range"}`
+        + ` · gap ${pd.gapPct >= 0 ? "+" : ""}${pd.gapPct}% (${pd.openLoc})`,
+      tone: Math.abs(pd.gapPct) >= 0.5 ? "warn" : "good",
+    });
+  }
   if (levelMap.ok) {
     const nb = { r: structure.barrier, sup: levelMap.supports.at(-1), res: levelMap.resistances[0] };
     report.push({
