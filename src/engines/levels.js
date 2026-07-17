@@ -20,6 +20,9 @@ export const LEVELS_DEFAULTS = {
   extMaxATR: 1.5,       // skip if price is further than this from the 5m EMA20, in 5m-ATR units
   minBarrierStrength: 1, // only levels this strong act as barriers for the gates
                          // (minor round numbers / prev-day close are context, not walls)
+  structSL: true,       // SL behind the helping barrier instead of a blind % of premium
+  minStopATR: 0.6,      // structural stop never tighter than this (noise floor), 15m-ATR units
+  maxStopATR: 3.0,      // ...and never wider (volatility cap when structure is far), 15m-ATR units
 };
 export function getLevelsConfig() {
   try { return { ...LEVELS_DEFAULTS, ...JSON.parse(localStorage.getItem("alphaedge_levels") || "{}") }; }
@@ -173,6 +176,34 @@ export function humanCheck({ direction, map, stopUnderPts, ext = null, cfg = LEV
     }
   }
   return out;
+}
+
+// ── Structure-based stop: the invalidation lives BEHIND the helping barrier
+// (below support for a long / above resistance for a short) — where the trade
+// idea is actually wrong — not at a blind percentage of premium. Returns
+// { stopUnder, level, kinds, capped } in UNDERLYING points, clamped to
+// [minStopATR, maxStopATR]×ATR (noise floor / volatility cap), or null when
+// the map has no strong helping level (caller falls back to the % default).
+export function structuralStopUnder({ direction, map, cfg = LEVELS_DEFAULTS }) {
+  if (!map?.ok) return null;
+  const minStr = cfg.minBarrierStrength ?? 1;
+  const helping = (direction === "CE" ? map.supports : map.resistances)
+    .filter(l => l.strength >= minStr);
+  if (!helping.length) return null;
+  const lvl = direction === "CE"
+    ? helping.reduce((m, l) => (l.price > m.price ? l : m))    // nearest support below
+    : helping.reduce((m, l) => (l.price < m.price ? l : m));   // nearest resistance above
+  const buffer = (cfg.bufferATR ?? 0.25) * map.atr;
+  const raw = direction === "CE"
+    ? map.spot - (lvl.price - buffer)
+    : (lvl.price + buffer) - map.spot;
+  const lo = (cfg.minStopATR ?? 0.6) * map.atr;
+  const hi = (cfg.maxStopATR ?? 3.0) * map.atr;
+  const stopUnder = Math.min(Math.max(raw, lo), hi);
+  return {
+    stopUnder: +stopUnder.toFixed(2), level: lvl.price, kinds: lvl.kinds,
+    capped: raw > hi ? "far" : raw < lo ? "near" : null,
+  };
 }
 
 // ── Barrier-aware target: cap the premium target so the implied underlying move

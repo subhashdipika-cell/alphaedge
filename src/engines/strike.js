@@ -102,7 +102,7 @@ export function expectedMove(chain, dteYears = null) {
 // and reports honestly.
 // Returns { leg, moneyness, reasons, unaffordable? } or null.
 export function selectStrike({ chain, direction, minPremium = 40, expected = null, strikePref = null,
-                               budget = null, underlying = null, mm = {} }) {
+                               budget = null, underlying = null, mm = {}, stopUnder = null }) {
   if (!chain?.strikes?.length) return null;
   const deltaLo = strikePref?.deltaLo ?? 0.45;
   const deltaHi = strikePref?.deltaHi ?? 0.65;
@@ -125,10 +125,14 @@ export function selectStrike({ chain, direction, minPremium = 40, expected = nul
     b.oi - a.oi);
   let leg = pool[0];
 
-  // ── Affordability walk (same SL formula as optionsTradePlan) ──
+  // ── Affordability walk (same SL priority as optionsTradePlan: fixed →
+  // structural stop × the LEG's delta → 30% of premium) ──
   const lotUnits = underlying ? getLotSize(underlying) : 0;
   const riskPerLot = (l) => {
-    let slPts = (mm.useSL && mm.slPoints > 0) ? Number(mm.slPoints) : Math.round(l.ltp * 0.30);
+    let slPts;
+    if (mm.useSL && mm.slPoints > 0) slPts = Number(mm.slPoints);
+    else if (stopUnder > 0) slPts = Math.round(stopUnder * (Math.abs(l.delta) || 0.5));
+    else slPts = Math.round(l.ltp * 0.30);
     slPts = Math.max(1, Math.min(slPts, Math.floor(l.ltp)));
     return slPts * lotUnits;
   };
@@ -162,15 +166,28 @@ export function selectStrike({ chain, direction, minPremium = 40, expected = nul
 
 // Position plan for a chosen option leg, sized from Money Mgt (capital + RR + SL)
 // and the risk policy (max % account risk per trade).
-export function optionsTradePlan({ rec, underlying, mm, riskPct }) {
+// structStop (from levels.structuralStopUnder): when present, the SL sits behind
+// the level map's helping barrier — converted to premium via the leg's delta —
+// instead of a blind 30% of premium. Sizing adapts (wider stop → fewer lots),
+// so account risk stays at riskPct either way.
+export function optionsTradePlan({ rec, underlying, mm, riskPct, structStop = null }) {
   if (!rec || !(rec.ltp > 0)) return null;
   const lotUnits = getLotSize(underlying);
   const capital  = Number(mm.capital) || 0;
   const budget   = capital * (riskPct / 100);             // ₹ risk allowed this trade
   const entry    = Number(rec.ltp) || 0;
-  // SL on the premium: fixed points if the user set one and it's sane, else 30%
-  // of premium; never more than the premium itself (max loss on a long option).
-  let slPts = (mm.useSL && mm.slPoints > 0) ? Number(mm.slPoints) : Math.round(entry * 0.30);
+  const adelta   = Math.abs(Number(rec.delta)) || 0.5;
+  // SL priority: explicit fixed points (user override) → structural stop →
+  // 30% of premium; never more than the premium itself (max loss on a long).
+  let slPts, slBasis = "pct", slLevel = null, slCapped = false;
+  if (mm.useSL && mm.slPoints > 0) {
+    slPts = Number(mm.slPoints); slBasis = "fixed";
+  } else if (structStop?.stopUnder > 0) {
+    slPts = Math.round(structStop.stopUnder * adelta);
+    slBasis = "structure"; slLevel = structStop.level ?? null; slCapped = structStop.capped === "far";
+  } else {
+    slPts = Math.round(entry * 0.30);
+  }
   slPts = Math.max(1, Math.min(slPts, Math.floor(entry)));
   const rr = mm.rr === "trail" ? (Number(mm.trailMaxRR) || 3) : (Number(mm.rr) || 2);
   const tgtPts = +(slPts * rr).toFixed(2);
@@ -183,6 +200,7 @@ export function optionsTradePlan({ rec, underlying, mm, riskPct }) {
   const trailR    = Number(mm.trailR)    > 0 ? Number(mm.trailR)    : 1;
   return {
     lotUnits, capital, riskPct, budget, entry, slPts, tgtPts, rr, lots,
+    slBasis, slLevel, slCapped,
     slPrice:  +(entry - slPts).toFixed(2),
     tgtPrice: +(entry + tgtPts).toFixed(2),
     trailStop, trailArmPts: +(slPts * trailArmR).toFixed(2), trailPts: +(slPts * trailR).toFixed(2),

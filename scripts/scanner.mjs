@@ -221,6 +221,7 @@ async function scanOne(store, underlying) {
       barrier: r.structure.barrier?.price ?? null,
       violations: (r.structure.violations || []).map(v => v.code),
       tgtCapped: !!r.structure.tgtCapped,
+      slBasis: r.structure.slBasis ?? "pct", slLevel: r.structure.slLevel ?? null,
     } : null,
     regime: r.regime.regime, style: r.style?.style,
     outcome: "pending", source: "Auto-Scan", tradeType: "Paper",

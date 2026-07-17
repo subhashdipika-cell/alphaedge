@@ -12,7 +12,7 @@ import { detectRegime } from "./regime.js";
 import { expectedMove, selectStrike, optionsTradePlan } from "./strike.js";
 import { evaluateGuardrails, marketSession } from "./guardrails.js";
 import { selectStyle, styleWeights, STYLE_STRIKE, STYLE_HOLD, getStrikePref } from "./style.js";
-import { buildLevelMap, extensionATR, humanCheck, capTargetToStructure, getLevelsConfig } from "./levels.js";
+import { buildLevelMap, extensionATR, humanCheck, capTargetToStructure, structuralStopUnder, getLevelsConfig } from "./levels.js";
 
 export const DEFAULT_WEIGHTS = { trend: 20, momentum: 15, ict: 20, chainOi: 15, greeks: 10, ivVix: 10, risk: 5, news: 5 };
 export const SCORE_WEIGHTS_KEY = "alphaedge_score_weights";
@@ -313,26 +313,34 @@ export function scoreOption(inputs) {
 
   // Select strike for the winning direction (style-specific delta band), then
   // finalize with greeks.
+  // ── Context awareness ("human touch"): level map + freshness + location +
+  // R:R-to-structure — computed BEFORE strike selection so the structural stop
+  // can drive sizing, affordability, and the R:R gate coherently.
+  const lvlCfg = getLevelsConfig();
+  const levelMap = buildLevelMap({ underlying, candles15m, spot: chain?.under_ltp, oi });
+  const ext = extensionATR(candles5m);
+  // Structure-based stop: the invalidation behind the helping barrier (below
+  // support for CE / above resistance for PE), in UNDERLYING points. Null →
+  // the plan falls back to the 30%-of-premium default.
+  const structStop = lvlCfg.structSL !== false
+    ? structuralStopUnder({ direction, map: levelMap, cfg: lvlCfg }) : null;
+
   // Affordability-aware: the ₹ risk budget for THIS trade (0-DTE scalps are
   // half-size), so selectStrike can step to a cheaper in-band strike when one
   // lot of the ideal strike would bust the budget (indivisible-lot problem).
   const riskBudget = (Number(mm.capital) || 0) * ((riskPct * sizeFactor) / 100);
   const pick = selectStrike({ chain, direction, minPremium: minPrem, expected: em, strikePref,
-                              budget: riskBudget, underlying, mm });
+                              budget: riskBudget, underlying, mm, stopUnder: structStop?.stopUnder ?? null });
   const chosenLeg = pick?.leg || null;
   const factors = scoreDir(direction, chosenLeg);
 
-  // ── Context awareness ("human touch"): level map + freshness + location +
-  // R:R-to-structure. Fixes the three mechanical flaws: chasing spent momentum,
-  // longing into resistance / shorting into support, and targets beyond barriers.
-  const lvlCfg = getLevelsConfig();
-  const levelMap = buildLevelMap({ underlying, candles15m, spot: chain?.under_ltp, oi });
-  const ext = extensionATR(candles5m);
-  // Prospective premium SL (same formula as the plan) → underlying points via delta.
-  const _slPts = chosenLeg ? Math.max(1, Math.min(
+  // Underlying stop distance for the R:R-to-structure gate: the structural stop
+  // when available, else the prospective %-premium SL back-converted via delta.
+  const _pctSl = chosenLeg ? Math.max(1, Math.min(
     (mm.useSL && mm.slPoints > 0) ? Number(mm.slPoints) : Math.round(chosenLeg.ltp * 0.30),
     Math.floor(chosenLeg.ltp))) : 0;
-  const stopUnderPts = _slPts && chosenLeg ? _slPts / (Math.abs(chosenLeg.delta) || 0.5) : 0;
+  const stopUnderPts = structStop?.stopUnder
+    ?? (_pctSl && chosenLeg ? _pctSl / (Math.abs(chosenLeg.delta) || 0.5) : 0);
   const structure = humanCheck({ direction, map: levelMap, stopUnderPts, ext, cfg: lvlCfg });
   if (lvlCfg.enforce && structure.violations.length) {
     structure.violations.forEach(v => gates.push(v.reason));
@@ -358,7 +366,8 @@ export function scoreOption(inputs) {
 
   // ── plan + expected move (hold + size from the style; 0-DTE scalp is half-size) ──
   const plan = (verdict !== "NO_TRADE" && chosenLeg)
-    ? { ...optionsTradePlan({ rec: { ltp: chosenLeg.ltp }, underlying, mm, riskPct: riskPct * sizeFactor }),
+    ? { ...optionsTradePlan({ rec: { ltp: chosenLeg.ltp, delta: chosenLeg.delta }, underlying, mm,
+                              riskPct: riskPct * sizeFactor, structStop }),
         maxHoldMin: hold.maxHoldMin, squareOff: hold.squareOff, sizeFactor } : null;
 
   // Barrier-aware target: the target lives just BEFORE the next barrier, never
@@ -396,6 +405,15 @@ export function scoreOption(inputs) {
     if (structure.extension != null) {
       report.push({ k: "Freshness", v: `${structure.extension >= 0 ? "+" : ""}${structure.extension}×ATR from 5m mean`,
         tone: Math.abs(structure.extension) > lvlCfg.extMaxATR ? "warn" : "good" });
+    }
+    if (plan?.slBasis === "structure") {
+      structure.slBasis = "structure"; structure.slLevel = plan.slLevel;
+      report.push({
+        k: "Stop",
+        v: `Behind ${direction === "CE" ? "support" : "resistance"} ${plan.slLevel} → SL ₹${plan.slPrice}`
+          + (plan.slCapped ? " (vol-capped)" : ""),
+        tone: "good",
+      });
     }
   }
 

@@ -5557,6 +5557,7 @@ export default function AlphaEdge() {
         barrier: result.structure.barrier?.price ?? null,
         violations: (result.structure.violations||[]).map(v=>v.code),
         tgtCapped: !!result.structure.tgtCapped,
+        slBasis: result.structure.slBasis ?? "pct", slLevel: result.structure.slLevel ?? null,
       } : null,
       regime: result.regime.regime,
       style: result.style?.style,

@@ -60,4 +60,40 @@ describe("selectStrike — affordability-aware walk", () => {
     const pick = selectStrike({ ...base, budget: 4000, mm: { useSL: true, slPoints: 50 } });
     expect(pick.leg.strike).toBe(24150);
   });
+
+  it("affordability walk uses the structural stop per-leg (delta-converted)", () => {
+    // stopUnder 130: Δ0.55 → 72 pts ×65 = ₹4,645 (busts ₹4,000) → Δ0.45 → 59 pts ×65 = ₹3,802 ✓
+    const pick = selectStrike({ ...base, budget: 4000, stopUnder: 130 });
+    expect(pick.leg.strike).toBe(24050);
+    expect(pick.leg.delta).toBe(-0.45);
+  });
+});
+
+describe("optionsTradePlan — structure-based SL", () => {
+  const mm = { capital: 400000, rr: 2 };
+
+  it("places the SL behind structure, premium via delta, and sizes to it", () => {
+    const plan = optionsTradePlan({ rec: { ltp: 200, delta: -0.5 }, underlying: "NIFTY50", mm, riskPct: 1,
+      structStop: { stopUnder: 100, level: 24100, kinds: ["pdl"], capped: null } });
+    expect(plan.slPts).toBe(50);            // 100 underlying pts × 0.5 delta
+    expect(plan.slBasis).toBe("structure");
+    expect(plan.slLevel).toBe(24100);
+    expect(plan.slPrice).toBe(150);
+    expect(plan.lots).toBe(1);              // ₹4,000 // (50 × 65) = 1
+    expect(plan.tgtPts).toBe(100);          // rr 2 on the structural stop
+  });
+
+  it("falls back to 30% of premium when there is no structural stop", () => {
+    const plan = optionsTradePlan({ rec: { ltp: 200, delta: -0.5 }, underlying: "NIFTY50", mm, riskPct: 1 });
+    expect(plan.slPts).toBe(60);            // 30% of 200
+    expect(plan.slBasis).toBe("pct");
+  });
+
+  it("a fixed Money-Mgt SL overrides the structural stop", () => {
+    const plan = optionsTradePlan({ rec: { ltp: 200, delta: -0.5 }, underlying: "NIFTY50",
+      mm: { ...mm, useSL: true, slPoints: 40 }, riskPct: 1,
+      structStop: { stopUnder: 100, level: 24100, kinds: ["pdl"], capped: null } });
+    expect(plan.slPts).toBe(40);
+    expect(plan.slBasis).toBe("fixed");
+  });
 });

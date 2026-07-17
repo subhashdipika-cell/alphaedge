@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildLevelMap, nearestBarriers, extensionATR, humanCheck, capTargetToStructure, LEVELS_DEFAULTS } from "../levels.js";
+import { buildLevelMap, nearestBarriers, extensionATR, humanCheck, capTargetToStructure, structuralStopUnder, LEVELS_DEFAULTS } from "../levels.js";
 
 // ── synthetic candles: 15m bars across two IST days around 24,000 ─────────────
 // Day 1 (prev day): 09:30–15:30 IST 2026-07-14 → PDH 24120, PDL 23880.
@@ -111,6 +111,42 @@ describe("humanCheck", () => {
     // Same extension is NOT chasing for a PE (price stretched up = good short context).
     const r2 = humanCheck({ direction: "PE", map, stopUnderPts: 30, ext: { ext: 2.1 }, cfg: LEVELS_DEFAULTS });
     expect(r2.violations.some(v => v.code === "chasing")).toBe(false);
+  });
+});
+
+describe("structuralStopUnder", () => {
+  // ATR 20 → buffer 5, clamp [12, 60].
+  const map = { ok: true, spot: 24000, atr: 20,
+    resistances: [{ price: 24030, kinds: ["swing-high"], strength: 1 }, { price: 24100, kinds: ["round"], strength: 1.2 }],
+    supports: [{ price: 23960, kinds: ["swing-low"], strength: 1 }, { price: 23800, kinds: ["round"], strength: 1.2 }] };
+
+  it("puts a CE stop behind the nearest strong support (support − buffer)", () => {
+    const s = structuralStopUnder({ direction: "CE", map });
+    expect(s.level).toBe(23960);
+    expect(s.stopUnder).toBe(45);           // 24000 − (23960 − 5)
+    expect(s.capped).toBeNull();
+  });
+  it("puts a PE stop behind the nearest strong resistance", () => {
+    const s = structuralStopUnder({ direction: "PE", map });
+    expect(s.level).toBe(24030);
+    expect(s.stopUnder).toBe(35);           // (24030 + 5) − 24000
+  });
+  it("volatility-caps a stop when structure is too far", () => {
+    const farMap = { ...map, supports: [{ price: 23800, kinds: ["round"], strength: 1.2 }] };
+    const s = structuralStopUnder({ direction: "CE", map: farMap });
+    expect(s.stopUnder).toBe(60);           // raw 205 → capped at 3.0×ATR
+    expect(s.capped).toBe("far");
+  });
+  it("applies the noise floor when spot sits right on the level", () => {
+    const tight = { ...map, supports: [{ price: 23998, kinds: ["pdl"], strength: 1.3 }] };
+    const s = structuralStopUnder({ direction: "CE", map: tight });
+    expect(s.stopUnder).toBe(12);           // raw 7 → floored at 0.6×ATR
+    expect(s.capped).toBe("near");
+  });
+  it("returns null when no strong helping level exists (fallback to % SL)", () => {
+    const none = { ...map, supports: [{ price: 23990, kinds: ["round"], strength: 0.6 }] };
+    expect(structuralStopUnder({ direction: "CE", map: none })).toBeNull();
+    expect(structuralStopUnder({ direction: "CE", map: { ok: false } })).toBeNull();
   });
 });
 
