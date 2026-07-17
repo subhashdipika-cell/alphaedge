@@ -445,6 +445,7 @@ DHAN_INSTRUMENTS = {
     "NIFTY50":   {"security_id": "13", "segment": "IDX_I", "instrument": "INDEX"},
     "BANKNIFTY": {"security_id": "25", "segment": "IDX_I", "instrument": "INDEX"},
     "SENSEX":    {"security_id": "51", "segment": "IDX_I", "instrument": "INDEX"},
+    "FINNIFTY":  {"security_id": "27", "segment": "IDX_I", "instrument": "INDEX"},
 }
 DHAN_TF_INTERVAL = {"1m": 1, "5m": 5, "15m": 15, "1H": 60}
 # Use the strategy-lab config — it auto-refreshes the 24h token daily via TOTP.
