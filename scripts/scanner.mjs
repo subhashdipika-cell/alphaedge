@@ -309,7 +309,7 @@ async function main() {
   console.log(` store    ${STORE}`);
   console.log(` PAPER ONLY — no broker orders. Entries ${hhmm(ENTER_FROM)}–${hhmm(ENTER_TO)} IST; 15:15 square-off.`);
   console.log(` telegram ${tgConfigured() ? "ON — alerts on paper open/close" : "off (set TG_BOT_TOKEN/TG_CHAT_ID or strategy-lab/telegram_config.json)"}`);
-  console.log(` zero-hero ${CFG.zeroHero ? "ON — expiry days 13:45–14:45, ₹3–5 lottery ×2 lots (--no-zerohero to disable)" : "off"}`);
+  console.log(` zero-hero ${CFG.zeroHero ? "ON — expiry days 14:00–14:45, ₹3–5 FADE-side lottery ×2 lots (--no-zerohero to disable)" : "off"}`);
   console.log("─".repeat(72));
 
   // Fail loudly if the bridge isn't up — the scanner is useless without it.

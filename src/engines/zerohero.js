@@ -1,7 +1,7 @@
 // ─── ZERO HERO — expiry-day lottery scalp (paper experiment) ──────────────────
-// On expiry day between 13:45–14:45 IST, buy 2 lots of a far-OTM option priced
-// ₹3–5 on the trending side. When premium doubles, sell half (the trade is now
-// free) and ride the rest into the close. Max loss = the tiny premium paid.
+// On expiry day between 14:00–14:45 IST, buy 2 lots of a far-OTM option priced
+// ₹3–5 on the FADE (counter-trend) side. When premium doubles, sell half (the
+// trade is now free) and ride the rest into the close. Max loss = the premium.
 //
 // This is a deliberate exception to the main stack's rules: it WANTS the 0-DTE
 // chain (no expiry roll) and premiums far below the ₹40 floor (it IS the
@@ -13,11 +13,17 @@
 //   leg A: target 2× entry (the "sell 50% at double")
 //   leg B: no target, trailing stop arming at 2× (the runner)
 
+// Window + side are DATA-DRIVEN (strategy-lab/zh_window_scan.py over 9 expiry
+// days, ~317 tickets): 14:00–14:45 was the only EV-positive zone (+0.15×/ticket,
+// 38.9% doubled, 11% hit 5×) and the spikes sat on the COUNTER-trend side —
+// expiry-afternoon far-OTM explosions are reversal/short-covering squeezes, so
+// fading the day's trend beat riding it in every afternoon window. Re-run the
+// scan as more expiry days accumulate; n is still small.
 export const ZH_DEFAULTS = {
   minPrem: 3,            // ₹ — candidate premium band
   maxPrem: 5,
   lots: 2,               // total lots (split 1 + 1 across the two legs)
-  enterFromMin: 13 * 60 + 45,   // 13:45 IST
+  enterFromMin: 14 * 60,        // 14:00 IST (13:45 entries sat in a −0.32× EV bucket)
   enterToMin: 14 * 60 + 45,     // 14:45 IST
   minOi: 5000,           // liquidity floor for the chosen strike
 };
@@ -35,13 +41,15 @@ export function zeroHeroPick({ chain, candles5m, istMin, cfg = ZH_DEFAULTS }) {
   if (!Array.isArray(candles5m) || candles5m.length < 30)
     return { ok: false, reason: "insufficient candles" };
 
-  // Direction = the day's trending side (close vs the 5m EMA20 — ride, don't fade).
+  // Direction = FADE the day's trend (counter-trend). Empirical: expiry-afternoon
+  // far-OTM spikes are reversal/squeeze-driven — the fade side doubled 38.9% vs
+  // the trend side's 17.4% in the 14:00 window (see zh_window_scan.py).
   const closes = candles5m.map(c => c.close);
   const k = 2 / 21;
   let ema = closes[0];
   for (const c of closes) ema = c * k + ema * (1 - k);
   const last = closes[closes.length - 1];
-  const direction = last >= ema ? "CE" : "PE";
+  const direction = last >= ema ? "PE" : "CE";
   const side = direction === "CE" ? "ce" : "pe";
 
   // Candidate: premium in [minPrem, maxPrem] with real OI, nearest to spot

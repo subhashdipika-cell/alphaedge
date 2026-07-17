@@ -25,23 +25,24 @@ function chain({ expiryToday = true } = {}) {
 }
 
 describe("zeroHeroPick", () => {
-  it("picks the in-band CE nearest to spot on an up-trending expiry day", () => {
+  it("FADES an up-trending expiry day (buys the PE) — spikes are reversal-driven", () => {
     const r = zeroHeroPick({ chain: chain(), candles5m: upDay, istMin: IN_WINDOW });
+    expect(r.ok).toBe(true);
+    expect(r.direction).toBe("PE");
+    expect(r.leg.strike).toBe(24150);       // in-band PE (₹4.1)
+  });
+
+  it("fades a down-trending day (buys the CE nearest to spot)", () => {
+    const r = zeroHeroPick({ chain: chain(), candles5m: dnDay, istMin: IN_WINDOW });
     expect(r.ok).toBe(true);
     expect(r.direction).toBe("CE");
     expect(r.leg.strike).toBe(24450);       // ₹4.6, closer than 24500's ₹3.2
     expect(r.leg.ltp).toBe(4.6);
   });
 
-  it("picks the PE side on a down-trending day", () => {
-    const r = zeroHeroPick({ chain: chain(), candles5m: dnDay, istMin: IN_WINDOW });
-    expect(r.ok).toBe(true);
-    expect(r.direction).toBe("PE");
-    expect(r.leg.strike).toBe(24150);
-  });
-
-  it("refuses outside the 13:45–14:45 window and on non-expiry days", () => {
+  it("refuses outside the 14:00–14:45 window and on non-expiry days", () => {
     expect(zeroHeroPick({ chain: chain(), candles5m: upDay, istMin: 12 * 60 }).ok).toBe(false);
+    expect(zeroHeroPick({ chain: chain(), candles5m: upDay, istMin: 13 * 60 + 50 }).ok).toBe(false);  // pre-14:00 bucket is EV-negative
     expect(zeroHeroPick({ chain: chain(), candles5m: upDay, istMin: 15 * 60 }).ok).toBe(false);
     expect(zeroHeroPick({ chain: chain({ expiryToday: false }), candles5m: upDay, istMin: IN_WINDOW }).ok).toBe(false);
   });
@@ -63,11 +64,11 @@ describe("zeroHeroRecords", () => {
     expect(recs).toHaveLength(2);
     const [a, b] = recs;
     expect(a.lots).toBe(1); expect(b.lots).toBe(1);
-    expect(a.tgtPremium).toBe(9.2);          // 2 × ₹4.6 — sell half at double
+    expect(a.tgtPremium).toBe(8.2);          // 2 × ₹4.1 (fade-side PE) — sell half at double
     expect(a.trailStop).toBe(false);
     expect(b.tgtPremium).toBe(0);            // runner: no fixed target
     expect(b.trailStop).toBe(true);
-    expect(b.trailArmPts).toBe(4.6);         // arms once the premium doubles
+    expect(b.trailArmPts).toBe(4.1);         // arms once the premium doubles
   });
 
   it("is a max-loss-limited lottery: SL 0 (the premium IS the risk), square-off on", () => {
