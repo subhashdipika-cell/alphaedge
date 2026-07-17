@@ -61,6 +61,8 @@ const { resolvePaperTrade, entryTsToUtc } = await import("../src/engines/resolve
 const { getMoneyMgt, getRiskPolicy } = await import("../src/state/settings.js");
 const { eventProximity } = await import("../src/data/events.js");
 const { sendPaperOpenAlert, sendPaperCloseAlert, tgConfigured } = await import("../src/data/telegram.js");
+const { zeroHeroPick, zeroHeroRecords } = await import("../src/engines/zerohero.js");
+const { fetchOptionChain, getLotSize } = await import("../src/data/bridge.js");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -77,6 +79,7 @@ const CFG = {
   risk: Number(opt("risk", getRiskPolicy().maxRiskPct || 1)),
   range: Number(opt("range", 8)),
   once: flag("once"),
+  zeroHero: !flag("no-zerohero"),   // expiry-day lottery scalp (paper experiment)
   underlyings: (opt("underlying", "") ? [opt("underlying", "")] : ASSETS.map(a => a.id)),
 };
 const ENTER_FROM = 9 * 60 + 20;   // no new entries before 09:20 IST (skip the open auction chop)
@@ -167,6 +170,9 @@ async function resolveOpen(store) {
   return changed;
 }
 
+// Last fetched inputs per underlying this tick (reused by Zero Hero for candles).
+const _lastInputs = new Map();
+
 // ── score one underlying and, if TRADE-grade, open a paper trade ──
 async function scanOne(store, underlying) {
   // One open position per underlying at a time (no stacking).
@@ -174,6 +180,7 @@ async function scanOne(store, underlying) {
     return { underlying, note: "skip(open)" };
   }
   const inputs = await fetchScoreInputs(underlying, CFG.range, null);
+  _lastInputs.set(underlying, inputs);
   if (!inputs.chain?.ok && !inputs.chain?.strikes?.length) return { underlying, note: "no-chain" };
   const oi = inputs.oiTrend ? analyzeOiTrend(inputs.oiTrend) : { ok: false };
   const r = scoreOption({
@@ -233,6 +240,37 @@ async function scanOne(store, underlying) {
   return { underlying, note: `TRADE(${r.score})→${r.strike.strike}${r.direction}` };
 }
 
+// ── Zero Hero: expiry-day lottery scalp, 13:45–14:45 IST (paper experiment) ──
+// Buys 2 lots of a ₹3–5 far-OTM option on the trending side of the EXPIRING
+// chain (bypasses the expiry roll on purpose), as two 1-lot legs: A targets 2×
+// (sell half at double), B rides with a trailing stop arming at 2×. One shot
+// per underlying per expiry day. Max loss = the tiny premium.
+async function maybeZeroHero(store, mins) {
+  if (!CFG.zeroHero) return;
+  const today = istDateStr();
+  for (const u of CFG.underlyings) {
+    // Already fired for this underlying's expiry today (ZH expiry === today)?
+    if (store.trades.some(t => t.source === "Zero-Hero" && t.assetId === u && t.expiry === today)) continue;
+    try {
+      // FRONT chain — fetchOptionChain(null) returns the nearest (expiring) expiry;
+      // hot in the bridge's 45s cache from the normal scan's first fetch.
+      const chain = await fetchOptionChain(u, CFG.range, null);
+      if (!chain?.isExpiryToday) continue;
+      const candles5m = _lastInputs.get(u)?.candles5m
+        ?? (await fetchScoreInputs(u, CFG.range, null)).candles5m;
+      const pick = zeroHeroPick({ chain, candles5m, istMin: mins });
+      if (!pick.ok) {
+        if (!/window|expiry day/.test(pick.reason)) log(`ZERO-HERO ${u}: skip — ${pick.reason}`);
+        continue;
+      }
+      const recs = zeroHeroRecords({ underlying: u, pick, lotSize: getLotSize(u) });
+      store.trades.push(...recs);
+      log(`ZERO-HERO OPENED ${u} ${pick.leg.strike}${pick.direction} @ ₹${pick.leg.ltp} ×2 lots (0-DTE lottery) · half off at ₹${(pick.leg.ltp * 2).toFixed(2)}, runner trails`);
+      sendPaperOpenAlert({ ...recs[0], lots: 2, id: recs[0].id.replace(/-A$/, "") });
+    } catch (e) { log(`ZERO-HERO ${u}: error — ${e.message}`); }
+  }
+}
+
 // ── one cycle: resolve, then (if in-session) scan for entries ──
 async function tick() {
   const store = loadStore();
@@ -254,6 +292,7 @@ async function tick() {
     try { notes.push((await scanOne(store, u)).note); }
     catch (e) { notes.push(`err:${e.message?.slice(0, 20)}`); }
   }
+  await maybeZeroHero(store, mins);
   saveStore(store);
   const s = store.summary;
   log(`scan ${CFG.underlyings.map((u, i) => `${u}:${notes[i]}`).join(" · ")} | open ${s.open} · resolved ${s.resolved} (${s.winRate}% WR, ${inr(s.netRs)})`);
@@ -270,6 +309,7 @@ async function main() {
   console.log(` store    ${STORE}`);
   console.log(` PAPER ONLY — no broker orders. Entries ${hhmm(ENTER_FROM)}–${hhmm(ENTER_TO)} IST; 15:15 square-off.`);
   console.log(` telegram ${tgConfigured() ? "ON — alerts on paper open/close" : "off (set TG_BOT_TOKEN/TG_CHAT_ID or strategy-lab/telegram_config.json)"}`);
+  console.log(` zero-hero ${CFG.zeroHero ? "ON — expiry days 13:45–14:45, ₹3–5 lottery ×2 lots (--no-zerohero to disable)" : "off"}`);
   console.log("─".repeat(72));
 
   // Fail loudly if the bridge isn't up — the scanner is useless without it.
