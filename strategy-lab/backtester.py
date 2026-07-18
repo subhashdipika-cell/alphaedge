@@ -21,7 +21,7 @@ import math
 import os
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -1225,6 +1225,303 @@ def run_backtest(
 
 # ── Daily analysis runner ──────────────────────────────────────────────────────
 
+# ── Two Candle Theory (Sivakumar Jayachandran / Kingdom Trading Strategy) ─────
+# Source: "Kingdom Trading Strategy" deck (oipulse.com), ingested to the vault
+# wiki 2026-07. Intraday NIFTY/BANKNIFTY breakout scalp on the 3-MIN chart:
+# two consecutive candles closing beyond ALL four "soldiers" (SuperTrend 10/2,
+# VWMA 20, session VWAP, Parabolic SAR 0.02/0.2), RSI in the momentum band
+# (long 50-80, short 20-40), BOTH bars carrying real futures volume
+# (>=125K NIFTY / >=50K BANKNIFTY per 3-min bar) and the option-chain OI
+# agreeing (the "Queen") -> enter on the 3rd candle, SL at the 1st candle's
+# extreme. 1-2 trades/day max ("win battles, not the war").
+#
+# Faithful-vs-adapted notes:
+# - OI gate: the deck reads futures long-buildup/short-covering; we only have
+#   the option-chain snapshots (data/options/*.csv), so the gate is put-vs-call
+#   WRITING dominance: rising total PE OI outpacing CE OI = bullish support
+#   (and mirrored) over a ~6-min lookback. OI data is MANDATORY - days without
+#   a chain file take no trades (the Queen never leaves the board).
+# - Exit: the deck rides winners with a SuperTrend trail; the lab expresses
+#   that through its TSL variants, with a fixed-RR fallback (rr_ratio).
+
+def resample_m1_to_m3(candles: list[dict]) -> list[dict]:
+    """Aggregate M1 rows into 3-minute bars (per session day, UTC buckets).
+    Each bar keeps `m1_idx` = index of its FIRST M1 candle (for signal idx)
+    and `m1_next` = index of the first M1 candle AFTER the bar."""
+    bars: list[dict] = []
+    cur = None
+    for i, c in enumerate(candles):
+        t = datetime.strptime(c["time"], "%Y-%m-%d %H:%M:%S")
+        bucket = (t.strftime("%Y-%m-%d"), t.hour, t.minute // 3)
+        if cur is None or cur["bucket"] != bucket:
+            if cur is not None:
+                bars.append(cur)
+            cur = {"bucket": bucket, "day": bucket[0], "time": c["time"],
+                   "open": c["open"], "high": c["high"], "low": c["low"],
+                   "close": c["close"], "volume": c["volume"],
+                   "m1_idx": i, "m1_next": i + 1}
+        else:
+            cur["high"] = max(cur["high"], c["high"])
+            cur["low"] = min(cur["low"], c["low"])
+            cur["close"] = c["close"]
+            cur["volume"] += c["volume"]
+            cur["m1_next"] = i + 1
+    if cur is not None:
+        bars.append(cur)
+    return bars
+
+
+def supertrend_tc(candles: list[dict], period: int = 10, mult: float = 2.0):
+    """Classic SuperTrend; returns the line value per bar (None until ready)."""
+    atr_v = atr(candles, period)
+    n = len(candles)
+    st: list[Optional[float]] = [None] * n
+    up_f = dn_f = None
+    trend_up = True
+    for i in range(n):
+        if atr_v[i] is None:
+            continue
+        hl2 = (candles[i]["high"] + candles[i]["low"]) / 2
+        up = hl2 + mult * atr_v[i]
+        dn = hl2 - mult * atr_v[i]
+        c_prev = candles[i - 1]["close"] if i else candles[i]["close"]
+        up_f = up if up_f is None or up < up_f or c_prev > up_f else up_f
+        dn_f = dn if dn_f is None or dn > dn_f or c_prev < dn_f else dn_f
+        c = candles[i]["close"]
+        if st[i - 1] is None if i else True:
+            trend_up = c >= hl2
+        elif trend_up and c < dn_f:
+            trend_up = False
+            up_f = up
+        elif not trend_up and c > up_f:
+            trend_up = True
+            dn_f = dn
+        st[i] = dn_f if trend_up else up_f
+    return st
+
+
+def parabolic_sar_tc(candles: list[dict], af_step: float = 0.02, af_max: float = 0.2):
+    """Standard Parabolic SAR (Wilder). Returns SAR value per bar."""
+    n = len(candles)
+    if n < 2:
+        return [None] * n
+    sar: list[Optional[float]] = [None] * n
+    rising = candles[1]["close"] >= candles[0]["close"]
+    sar[1] = candles[0]["low"] if rising else candles[0]["high"]
+    ep = candles[1]["high"] if rising else candles[1]["low"]
+    af = af_step
+    for i in range(2, n):
+        s = sar[i - 1] + af * (ep - sar[i - 1])
+        if rising:
+            s = min(s, candles[i - 1]["low"], candles[i - 2]["low"])
+            if candles[i]["low"] < s:                      # flip down
+                rising, s, ep, af = False, ep, candles[i]["low"], af_step
+            elif candles[i]["high"] > ep:
+                ep, af = candles[i]["high"], min(af + af_step, af_max)
+        else:
+            s = max(s, candles[i - 1]["high"], candles[i - 2]["high"])
+            if candles[i]["high"] > s:                     # flip up
+                rising, s, ep, af = True, ep, candles[i]["high"], af_step
+            elif candles[i]["low"] < ep:
+                ep, af = candles[i]["low"], min(af + af_step, af_max)
+        sar[i] = s
+    return sar
+
+
+def vwma_tc(candles: list[dict], period: int = 20):
+    """Volume-weighted moving average of closes."""
+    n = len(candles)
+    out: list[Optional[float]] = [None] * n
+    for i in range(period - 1, n):
+        window = candles[i - period + 1: i + 1]
+        vol = sum(c["volume"] for c in window)
+        if vol <= 0:
+            continue
+        out[i] = sum(c["close"] * c["volume"] for c in window) / vol
+    return out
+
+
+def session_vwap_tc(candles: list[dict]):
+    """Session (per-day) VWAP from typical price x volume."""
+    out: list[Optional[float]] = [None] * len(candles)
+    day = None
+    pv = vv = 0.0
+    for i, c in enumerate(candles):
+        d = c["time"][:10]
+        if d != day:
+            day, pv, vv = d, 0.0, 0.0
+        tp = (c["high"] + c["low"] + c["close"]) / 3
+        pv += tp * c["volume"]
+        vv += c["volume"]
+        out[i] = pv / vv if vv > 0 else None
+    return out
+
+
+_TC_OI_CACHE: dict = {}
+
+def _tc_load_oi(symbol: str) -> list[tuple]:
+    """Chain-wide (total CE, total PE) OI per snapshot from data/options CSVs.
+    Timestamps are UTC, same clock as the futures candles."""
+    if symbol in _TC_OI_CACHE:
+        return _TC_OI_CACHE[symbol]
+    series: list[tuple] = []
+    opt_dir = Path(__file__).parent / "data" / "options"
+    for f in sorted(opt_dir.glob(f"{symbol}_OPT_*.csv")):
+        per_ts: dict = {}
+        try:
+            with open(f, newline="", encoding="utf-8") as fh:
+                for row in csv.DictReader(fh):
+                    ts = row.get("time", "")
+                    typ = (row.get("type") or "").upper()
+                    try:
+                        oi = float(row.get("oi") or 0)
+                    except ValueError:
+                        continue
+                    ce, pe = per_ts.get(ts, (0.0, 0.0))
+                    if typ == "CE":
+                        ce += oi
+                    elif typ == "PE":
+                        pe += oi
+                    per_ts[ts] = (ce, pe)
+        except OSError:
+            continue
+        for ts, (ce, pe) in per_ts.items():
+            try:
+                series.append((datetime.strptime(ts, "%Y-%m-%d %H:%M:%S"), ce, pe))
+            except ValueError:
+                continue
+    series.sort(key=lambda x: x[0])
+    _TC_OI_CACHE[symbol] = series
+    return series
+
+
+def _tc_oi_bias(series: list[tuple], t: datetime, lookback_min: int = 6):
+    """'bull' when put WRITING dominates (dPE>0 and dPE>dCE), 'bear' mirrored,
+    None when flat/unknown. Needs a snapshot near t and one ~lookback earlier."""
+    if not series:
+        return None
+    lo, hi = 0, len(series) - 1
+    while lo < hi:                                   # rightmost snapshot <= t
+        mid = (lo + hi + 1) // 2
+        if series[mid][0] <= t:
+            lo = mid
+        else:
+            hi = mid - 1
+    if series[lo][0] > t or (t - series[lo][0]).total_seconds() > 240:
+        return None                                  # no fresh snapshot
+    now = series[lo]
+    tgt = t - timedelta(minutes=lookback_min)
+    j = lo
+    while j > 0 and series[j][0] > tgt:
+        j -= 1
+    if series[j][0] > tgt or now[0] == series[j][0]:
+        return None                                  # day open / gap
+    d_ce = now[1] - series[j][1]
+    d_pe = now[2] - series[j][2]
+    if d_pe > 0 and d_pe > d_ce:
+        return "bull"
+    if d_ce > 0 and d_ce > d_pe:
+        return "bear"
+    return None
+
+
+class Two_Candle_Theory(Strategy):
+    """Sivakumar Jayachandran's 2 Candle Theory — 3-min breakout scalp with
+    volume, RSI-band, 4-indicator alignment and option-OI confirmation."""
+    name      = "Two_Candle_Theory"
+    timeframe = "M1"          # loads M1 futures data; resamples to 3-min bars
+    category  = "scalp"
+    rr_ratio  = 2.0           # deck rides with an ST trail; TSL variants proxy it
+
+    def __init__(self, oi_symbol: str = "NIFTY50", vol_per_bar: float | None = None,
+                 vol_surge_mult: float = 2.0, vol_median_bars: int = 40,
+                 rsi_long=(50.0, 80.0), rsi_short=(20.0, 40.0),
+                 max_trades_day: int = 2):
+        # Volume gate: the deck's absolute thresholds (125K NIFTY / 50K BN per
+        # 3-min bar) date from a far higher-volume F&O era — on the current
+        # Dhan monthly-futures feed the NIFTY median 3-min volume is ~21K, so
+        # the absolutes would fire ~1% of the time. Default is therefore a
+        # RELATIVE surge gate preserving the deck's intent: both bars must
+        # carry >= vol_surge_mult x the trailing vol_median_bars median
+        # (~top 15% activity at 2.0x). Pass vol_per_bar to use absolutes.
+        self.oi_symbol = oi_symbol
+        self.vol_per_bar = vol_per_bar
+        self.vol_surge_mult = vol_surge_mult
+        self.vol_median_bars = vol_median_bars
+        self.rsi_long, self.rsi_short = rsi_long, rsi_short
+        self.max_trades_day = max_trades_day
+
+    def signals(self, candles):
+        m3 = resample_m1_to_m3(candles)
+        if len(m3) < 25:
+            return []
+        closes = [b["close"] for b in m3]
+        st_v   = supertrend_tc(m3, 10, 2.0)
+        sar_v  = parabolic_sar_tc(m3, 0.02, 0.2)
+        vwma_v = vwma_tc(m3, 20)
+        vwap_v = session_vwap_tc(m3)
+        rsi_v  = rsi(closes, 14)
+        oi     = _tc_load_oi(self.oi_symbol)
+
+        def above_all(k):   # candle closes above every soldier
+            vals = (st_v[k], sar_v[k], vwma_v[k], vwap_v[k])
+            return all(v is not None and m3[k]["close"] > v for v in vals)
+
+        def below_all(k):
+            vals = (st_v[k], sar_v[k], vwma_v[k], vwap_v[k])
+            return all(v is not None and m3[k]["close"] < v for v in vals)
+
+        def vol_ok(k):                         # Weapons: both bars need a surge
+            if self.vol_per_bar is not None:   # deck's absolute mode
+                return (m3[k - 1]["volume"] >= self.vol_per_bar
+                        and m3[k]["volume"] >= self.vol_per_bar)
+            lo = max(0, k - self.vol_median_bars)
+            window = sorted(b["volume"] for b in m3[lo:k])
+            if len(window) < 20:
+                return False
+            med = window[len(window) // 2]
+            floor = med * self.vol_surge_mult
+            return m3[k - 1]["volume"] >= floor and m3[k]["volume"] >= floor
+
+        sigs, day_count, last_day = [], 0, None
+        cooldown_until = -1
+        for i in range(21, len(m3) - 1):
+            b1, b2, b3 = m3[i - 1], m3[i], m3[i + 1]
+            if b1["day"] != b2["day"] or b2["day"] != b3["day"]:
+                continue                       # the 3 candles must share a session
+            if b2["day"] != last_day:
+                last_day, day_count = b2["day"], 0
+            if day_count >= self.max_trades_day or i <= cooldown_until:
+                continue
+            if not vol_ok(i):
+                continue
+            if rsi_v[i] is None:
+                continue
+            t2 = datetime.strptime(b2["time"], "%Y-%m-%d %H:%M:%S") + timedelta(minutes=3)
+            bias = _tc_oi_bias(oi, t2)
+            if bias is None:
+                continue                       # the Queen is mandatory
+            entry_idx = b3["m1_idx"]
+            entry = candles[entry_idx]["open"]
+            if (bias == "bull" and above_all(i - 1) and above_all(i)
+                    and self.rsi_long[0] <= rsi_v[i] <= self.rsi_long[1]):
+                sl = b1["low"]                 # 1st candle low = the fort
+                if entry > sl:
+                    sigs.append({"idx": entry_idx, "side": "BUY", "entry": entry,
+                                 "sl": sl, "tp": entry + (entry - sl) * self.rr_ratio})
+                    day_count += 1
+                    cooldown_until = i + 5     # no immediate re-signal
+            elif (bias == "bear" and below_all(i - 1) and below_all(i)
+                    and self.rsi_short[0] <= rsi_v[i] <= self.rsi_short[1]):
+                sl = b1["high"]
+                if entry < sl:
+                    sigs.append({"idx": entry_idx, "side": "SELL", "entry": entry,
+                                 "sl": sl, "tp": entry - (sl - entry) * self.rr_ratio})
+                    day_count += 1
+                    cooldown_until = i + 5
+        return sigs
+
+
 SYMBOL_STRATEGIES = {
     # ── Dhan (Indian market) instruments — data via dhan_collector.py ──────────
     # Only backtested if matching CSVs exist in data/; skipped otherwise.
@@ -1242,6 +1539,7 @@ SYMBOL_STRATEGIES = {
         (ORB_Session_Breakout(),      "M5"),
         (ML_Trader_Confluence(kernel="RBF", regressor="KRR"),       "M5"),  # NIFTY50
         (ML_Trader_Confluence_Swing(kernel="RBF", regressor="KRR"), "H1"),
+        (Two_Candle_Theory(oi_symbol="NIFTY50"), "M1"),
     ],
     "BANKNIFTY": [
         (EMA_Crossover_RSI(),         "M5"),
@@ -1257,6 +1555,7 @@ SYMBOL_STRATEGIES = {
         (ORB_Session_Breakout(),      "M5"),
         (ML_Trader_Confluence(kernel="RBF", regressor="KRR"),       "M5"),  # BANKNIFTY
         (ML_Trader_Confluence_Swing(kernel="RBF", regressor="KRR"), "H1"),
+        (Two_Candle_Theory(oi_symbol="BANKNIFTY"), "M1"),
     ],
     "SENSEX": [
         (EMA_Crossover_RSI(),         "M5"),
