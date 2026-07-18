@@ -14,7 +14,13 @@ import { evaluateGuardrails, marketSession } from "./guardrails.js";
 import { selectStyle, styleWeights, STYLE_STRIKE, STYLE_HOLD, getStrikePref } from "./style.js";
 import { buildLevelMap, extensionATR, humanCheck, capTargetToStructure, structuralStopUnder, getLevelsConfig } from "./levels.js";
 
-export const DEFAULT_WEIGHTS = { trend: 20, momentum: 15, ict: 20, chainOi: 15, greeks: 10, ivVix: 10, risk: 5, news: 5 };
+// Chain & OI is deliberately the LARGEST factor (2026-07-19 rebalance): in
+// Indian index options, writer positioning (OI, ΔOI, spurts, walls) is the
+// primary predictive edge; price action (trend+momentum+ict = 42) confirms
+// rather than leads. Direction voting is now 42 price-action vs 28 OI + 10
+// IV/VIX — OI can flip a mixed tape, and a strongly opposed smart-money read
+// hard-gates the trade (see the don't-fight-the-writers gate in scoreOption).
+export const DEFAULT_WEIGHTS = { trend: 15, momentum: 12, ict: 15, chainOi: 28, greeks: 10, ivVix: 10, risk: 5, news: 5 };
 export const SCORE_WEIGHTS_KEY = "alphaedge_score_weights";
 export const TRADE_THRESHOLD = 70;
 export const WATCH_THRESHOLD = 55;
@@ -152,19 +158,39 @@ function factorChainOI(dir, w, { oi, chain }) {
   if (!oi?.ok) return F(w, 0, ["OI-trend data unavailable"], true);
   const bull = isBull(dir);
   const reasons = [];
+  const MAX = 18;                       // internal sub-point scale → rescaled to w
   let pts = 0;
+  // 1) Smart-money composite (5) — writer bias + centroid migration + walls + divergence.
   const sm = oi.smartMoney;
   if (sm.bias === (bull ? "BULLISH" : "BEARISH")) { pts += 5 * clamp(sm.strength / 0.6, 0.3, 1); reasons.push(`Smart-money OI ${sm.bias} (${(sm.strength * 100).toFixed(0)}%)`); }
+  // 2) Confirmation matrix / writer bias (3).
   const wb = oi.matrix.writerBias;
-  if (wb === (bull ? "BULLISH" : "BEARISH")) { pts += 4; reasons.push(`Writer bias ${wb} (writers fading ${bull ? "puts" : "calls"})`); }
-  // Wall geometry: room to the opposite wall
+  if (wb === (bull ? "BULLISH" : "BEARISH")) { pts += 3; reasons.push(`Writer bias ${wb} (writers fading ${bull ? "puts" : "calls"})`); }
+  // 3) Change-in-OI flows (3): the session's writing/unwinding DIRECTION. For a
+  // call buy the friendly flows are put-writing (support being sold under you)
+  // and call-unwinding (shorts covering overhead); mirror for a put buy.
+  const fl = oi.flows;
+  if (fl) {
+    const friendly = bull ? (fl.putWriting + fl.callUnwind) : (fl.callWriting + fl.putUnwind);
+    if (friendly >= 0.6) { pts += 3; reasons.push(`ΔOI flows ${(friendly * 100).toFixed(0)}% on your side (${bull ? "put writing + call unwinding" : "call writing + put unwinding"})`); }
+    else if (friendly >= 0.5) { pts += 1.5; reasons.push(`ΔOI flows mildly favourable (${(friendly * 100).toFixed(0)}%)`); }
+  }
+  // 4) OI spurts (3): today's biggest ΔOI% builders. A put-side spurt is fresh
+  // support (bullish); a call-side spurt is fresh resistance (bearish).
+  const friendlySpurts = (oi.spurts || []).filter(s => s.type === (bull ? "PE" : "CE") && s.pct >= 10);
+  if (friendlySpurts.length) {
+    const top = friendlySpurts[0];
+    pts += top.pct >= 25 ? 3 : 1.5;
+    reasons.push(`OI spurt: ${top.strike}${top.type} +${top.pct}% ΔOI (${bull ? "fresh support written" : "fresh resistance written"})`);
+  }
+  // 5) Wall geometry (3): room to the opposite wall.
   const spot = oi.underLtp;
-  if (bull && spot > oi.walls.support.strike && oi.walls.resistance.strike - spot >= (oi.atmStrike ? 1 : 0)) { pts += 4; reasons.push(`Above PE-wall support ${oi.walls.support.strike}, headroom to ${oi.walls.resistance.strike}`); }
-  else if (!bull && spot < oi.walls.resistance.strike && spot - oi.walls.support.strike >= 0) { pts += 4; reasons.push(`Below CE-wall resistance ${oi.walls.resistance.strike}, room to ${oi.walls.support.strike}`); }
-  // PCR regime
-  if ((bull && oi.pcr > 1.15) || (!bull && oi.pcr < 0.85)) { pts += 2; reasons.push(`PCR ${oi.pcr.toFixed(2)} supports direction`); }
+  if (bull && spot > oi.walls.support.strike && oi.walls.resistance.strike - spot >= (oi.atmStrike ? 1 : 0)) { pts += 3; reasons.push(`Above PE-wall support ${oi.walls.support.strike}, headroom to ${oi.walls.resistance.strike}`); }
+  else if (!bull && spot < oi.walls.resistance.strike && spot - oi.walls.support.strike >= 0) { pts += 3; reasons.push(`Below CE-wall resistance ${oi.walls.resistance.strike}, room to ${oi.walls.support.strike}`); }
+  // 6) PCR regime (1).
+  if ((bull && oi.pcr > 1.15) || (!bull && oi.pcr < 0.85)) { pts += 1; reasons.push(`PCR ${oi.pcr.toFixed(2)} supports direction`); }
   if (!reasons.length) reasons.push("OI positioning does not favour this direction");
-  return F(w, pts, reasons);
+  return F(w, (pts / MAX) * w, reasons);
 }
 
 // ── Factor 5: Greeks on the CHOSEN strike (directional; runs after selection) ──
@@ -310,6 +336,15 @@ export function scoreOption(inputs) {
   const dirTotal = (f) => Object.entries(f).filter(([k]) => k !== "greeks")
     .reduce((s, [, v]) => s + (v.missing ? 0 : v.points), 0);
   const direction = dirTotal(preCE) >= dirTotal(prePE) ? "CE" : "PE";
+
+  // OI veto — never buy against a STRONG writer consensus. Price action can
+  // outvote a mild OI lean, but when the smart-money composite is firmly on
+  // the other side, stand aside instead of fighting the writers.
+  const smv = oi?.ok ? oi.smartMoney : null;
+  if (smv && smv.bias !== "NEUTRAL" && smv.bias !== (direction === "CE" ? "BULLISH" : "BEARISH")
+      && smv.strength >= 0.5) {
+    gates.push(`Smart-money OI is ${smv.bias} at ${(smv.strength * 100).toFixed(0)}% strength against a ${direction} buy — don't fight the writers`);
+  }
 
   // Select strike for the winning direction (style-specific delta band), then
   // finalize with greeks.

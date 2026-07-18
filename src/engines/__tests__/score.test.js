@@ -123,6 +123,44 @@ describe("scoreOption — hard gates", () => {
   });
 });
 
+describe("scoreOption — OI as the lead voice (2026-07-19 rebalance)", () => {
+  it("hard-gates a buy against a strong opposing writer consensus (OI veto)", () => {
+    const hostileOi = { ...bullOi(), smartMoney: { bias: "BEARISH", strength: 0.7, reasons: ["call writing everywhere"] } };
+    const r = scoreOption({
+      underlying: "NIFTY50",
+      candles5m: trendUp(), candles15m: trendUp(), candles1H: trendUp(),
+      chain: bullChain(), oi: hostileOi, vix,
+      history: [], events: {}, mm: { capital: 400000, rr: 2 }, riskPct: 1,
+    });
+    // Bullish tape, strongly bearish writers → stand aside, don't fight.
+    expect(r.verdict).toBe("NO_TRADE");
+    expect(r.gates.some(g => /fight the writers/.test(g))).toBe(true);
+  });
+
+  it("scores ΔOI flows and OI spurts when present (previously unscored)", () => {
+    const base = scoreOption({
+      underlying: "NIFTY50", candles5m: trendUp(), candles15m: trendUp(), candles1H: trendUp(),
+      chain: bullChain(), oi: bullOi(), vix, history: [],
+    });
+    const richOi = { ...bullOi(),
+      flows: { putWriting: 0.5, callUnwind: 0.2, callWriting: 0.2, putUnwind: 0.1 },   // 70% friendly
+      spurts: [{ strike: 24100, type: "PE", pct: 32.5, dOi: 400000, oi: 900000 }],
+    };
+    const rich = scoreOption({
+      underlying: "NIFTY50", candles5m: trendUp(), candles15m: trendUp(), candles1H: trendUp(),
+      chain: bullChain(), oi: richOi, vix, history: [],
+    });
+    expect(rich.factors.chainOi.score01).toBeGreaterThan(base.factors.chainOi.score01);
+    expect(rich.factors.chainOi.reasons.some(x => /ΔOI flows/.test(x))).toBe(true);
+    expect(rich.factors.chainOi.reasons.some(x => /OI spurt/.test(x))).toBe(true);
+  });
+
+  it("Chain & OI carries the largest default weight", () => {
+    const max = Math.max(...Object.values(DEFAULT_WEIGHTS));
+    expect(DEFAULT_WEIGHTS.chainOi).toBe(max);
+  });
+});
+
 describe("scoreOption — coverage renormalization", () => {
   it("still scores with VIX missing (renormalizes) but not below coverage floor", () => {
     const r = scoreOption({ underlying: "NIFTY50", candles5m: trendUp(), candles15m: trendUp(), candles1H: trendUp(), chain: bullChain(), oi: bullOi(), vix: null, history: [] });
