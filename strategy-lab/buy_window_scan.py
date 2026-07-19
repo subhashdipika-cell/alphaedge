@@ -51,6 +51,28 @@ def simulate(entry, sl_pts, later_bids):
             return (tgt, "target")
     return (later_bids[-1], "squareoff")
 
+
+def simulate_scalp(entry, sl_pts, later, hold_min, entry_t):
+    """Scalp walk: same SL/target/trail but a HARD time-stop after hold_min.
+    `later` = [(t, bid)] so the time-stop can cut by clock. Returns (exit, reason)."""
+    sl = entry - sl_pts
+    tgt = entry + RR * sl_pts
+    armed, peak, trail = False, entry, None
+    last = entry
+    for t, b in later:
+        if t - entry_t > hold_min:
+            return (last, "timestop")
+        last = b
+        if b > peak: peak = b
+        if not armed and b >= entry + sl_pts: armed = True
+        if armed: trail = max(trail if trail is not None else -1e9, peak - sl_pts)
+        stop = max(sl, trail) if armed and trail is not None else sl
+        if b <= stop:
+            return (stop, "trail" if armed and stop > sl else "sl")
+        if b >= tgt:
+            return (tgt, "target")
+    return (last, "timestop")
+
 def main():
     here = os.path.dirname(os.path.abspath(__file__))
     files = []
@@ -64,6 +86,8 @@ def main():
     n_expiry = sum(1 for x in files if x[3])
     agg = defaultdict(lambda: defaultdict(lambda: {"n": 0, "r": 0.0, "win": 0, "sl": 0, "tgt": 0, "trail": 0, "sq": 0}))
     per_u = defaultdict(lambda: defaultdict(lambda: {"n": 0, "r": 0.0}))
+    # scalp: hold_min -> window -> stats
+    scalp = defaultdict(lambda: defaultdict(lambda: {"n": 0, "r": 0.0, "win": 0, "sl": 0, "tgt": 0, "trail": 0, "ts": 0}))
 
     for under, date, path, is_exp in files:
         if is_exp:
@@ -115,9 +139,20 @@ def main():
                 if entry < 40:                     # engine's premium floor
                     continue
                 sl_pts = round(entry * SL_PCT)
-                later = [(x[2] if x[2] > 0 else x[1]) for x in legs[key] if t < x[0] <= CUTOFF]
+                later_ts = [(x[0], (x[2] if x[2] > 0 else x[1])) for x in legs[key] if t < x[0] <= CUTOFF]
+                later = [b for _, b in later_ts]
                 if len(later) < 10:
                     continue
+                # Scalp variants (trend side only): identical mechanics but a hard
+                # time-stop, so we can see which windows pay a 5-10 min hold.
+                if side_tag == "trend":
+                    w_s = f"{(t // 30) * 30 // 60:02d}:{(t // 30) * 30 % 60:02d}"
+                    for hold in (5, 10):
+                        ex, why_s = simulate_scalp(entry, sl_pts, later_ts, hold, t)
+                        rr_s = (ex - entry) / sl_pts
+                        s = scalp[hold][w_s]
+                        s["n"] += 1; s["r"] += rr_s; s["win"] += rr_s > 0
+                        s[{"sl": "sl", "target": "tgt", "trail": "trail", "timestop": "ts"}[why_s]] += 1
                 exit_p, why = simulate(entry, sl_pts, later)
                 r_mult = (exit_p - entry) / sl_pts
                 w = f"{(t // 30) * 30 // 60:02d}:{(t // 30) * 30 % 60:02d}"
@@ -137,6 +172,19 @@ def main():
             print(f"{w:>6} {a['n']:>4} {100*a['win']/a['n']:>5.1f}% {a['r']/a['n']:>+6.2f}R "
                   f"{100*a['sl']/a['n']:>4.0f}% {100*a['tgt']/a['n']:>4.0f}% {100*a['trail']/a['n']:>5.0f}% {100*a['sq']/a['n']:>4.0f}%")
         print()
+    for hold in (5, 10):
+        print(f"── SCALP {hold}-min hold, trend side (Δ≈0.55, SL 30%, 2R tgt, 1R trail) ──")
+        print(f"{'window':>6} {'n':>4} {'win%':>6} {'avgR':>7} {'SL%':>5} {'tgt%':>5} {'trail%':>6} {'time%':>6}")
+        for w in sorted(scalp[hold]):
+            a = scalp[hold][w]
+            if not a["n"]: continue
+            print(f"{w:>6} {a['n']:>4} {100*a['win']/a['n']:>5.1f}% {a['r']/a['n']:>+6.2f}R "
+                  f"{100*a['sl']/a['n']:>4.0f}% {100*a['tgt']/a['n']:>4.0f}% {100*a['trail']/a['n']:>5.0f}% {100*a['ts']/a['n']:>5.0f}%")
+        tot = {k: sum(v[k] for v in scalp[hold].values()) for k in ("n", "r", "win")}
+        if tot["n"]:
+            print(f"{'ALL':>6} {tot['n']:>4} {100*tot['win']/tot['n']:>5.1f}% {tot['r']/tot['n']:>+6.2f}R")
+        print()
+
     print("trend-side avg R by window per underlying (n>=15):")
     for u in sorted(per_u):
         parts = [f"{w}:{per_u[u][w]['r']/per_u[u][w]['n']:+.2f}R({per_u[u][w]['n']})"

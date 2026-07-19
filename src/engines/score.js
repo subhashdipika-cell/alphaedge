@@ -25,6 +25,32 @@ export const SCORE_WEIGHTS_KEY = "alphaedge_score_weights";
 export const TRADE_THRESHOLD = 70;
 export const WATCH_THRESHOLD = 55;
 
+// ── Data-driven entry windows (strategy-lab/buy_window_scan.py, 51 non-expiry
+// days, ~850 simulated entries per style) ────────────────────────────────────
+//   INTRADAY/SWING: mornings pay (09:30 +0.11R, 10:00 +0.21R) and every window
+//   from 13:00 on is negative (−0.02 → −0.15R): the 2R premium target becomes
+//   unreachable before the 15:15 square-off, so late entries just bleed theta
+//   into a flat exit (80–95% square-off rate). Cut new entries at 13:00.
+//   SCALP: with a 5–10 min hold the premium almost never travels far enough to
+//   hit SL or target — ~100% time-stops, avg ≈ 0.00R GROSS, i.e. negative after
+//   ~0.02R round-trip costs. The ONE exception, stable across four different
+//   SL/target geometries, is 10:00–10:30 (+0.13 → +0.27R, ~59% win). Scalps are
+//   restricted to it; outside that window scalping is a cost-drag coin flip.
+// Resolution/trailing of OPEN trades is unaffected — this gates ENTRIES only.
+// Widen/re-derive as more days accumulate (n is modest; one bucket ≈ 84 entries).
+export const STYLE_ENTRY_WINDOW = {
+  SCALP:    { from: 10 * 60,      to: 10 * 60 + 30 },
+  INTRADAY: { from: 9 * 60 + 15,  to: 13 * 60 },
+  SWING:    { from: 9 * 60 + 15,  to: 13 * 60 },
+};
+
+// Minutes-of-day IST (same idiom as lib/ist.js — correct on any machine zone).
+function istMinutesNow() {
+  const n = new Date();
+  const ist = new Date(n.getTime() + (n.getTimezoneOffset() + 330) * 60000);
+  return ist.getHours() * 60 + ist.getMinutes();
+}
+
 export function getScoreWeights() {
   try {
     const raw = JSON.parse(localStorage.getItem(SCORE_WEIGHTS_KEY) || "{}");
@@ -310,6 +336,17 @@ export function scoreOption(inputs) {
   if (chain?.isExpiryToday && getGuardBlockExpiry() && style !== "SCALP")
     gates.push(`Expiry day (0-DTE) — blocked for ${style.toLowerCase()} (scalp-only on expiry)`);
   if (eventSoon) gates.push(`High-impact event in ~${eventMin}m — stand aside`);
+  // Style entry window (empirical — see STYLE_ENTRY_WINDOW). Only enforced while
+  // the market is open: off-hours scoring is research/preview, not an entry.
+  const nowMin = Number.isFinite(inputs.nowMin) ? inputs.nowMin : istMinutesNow();
+  const marketOpenNow = nowMin >= 9 * 60 + 15 && nowMin <= 15 * 60 + 30;
+  const win = STYLE_ENTRY_WINDOW[style];
+  if (marketOpenNow && win && (nowMin < win.from || nowMin > win.to)) {
+    const hhmm = (m) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+    gates.push(style === "SCALP"
+      ? `Outside the scalp window ${hhmm(win.from)}–${hhmm(win.to)} — scalps only clear costs there (backtest)`
+      : `Past the ${hhmm(win.to)} entry cutoff — afternoon ${style.toLowerCase()} entries are negative-expectancy (backtest)`);
+  }
   if (!regime.favorable && (regime.regime === "RANGE" || regime.regime === "VOL_COMPRESSION")) gates.push(`Regime ${regime.label} — buyer-hostile`);
 
   const session = marketSessionQuality(underlying);

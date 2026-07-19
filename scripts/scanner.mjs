@@ -83,7 +83,11 @@ const CFG = {
   underlyings: (opt("underlying", "") ? [opt("underlying", "")] : ASSETS.map(a => a.id)),
 };
 const ENTER_FROM = 9 * 60 + 20;   // no new entries before 09:20 IST (skip the open auction chop)
-const ENTER_TO   = 15 * 60 + 15;  // no new entries after 15:15 IST (matches the 15:15 square-off)
+// Outer bound only — the engine owns the real, style-aware cutoffs
+// (score.js STYLE_ENTRY_WINDOW: intraday/swing 13:00, scalp 10:00–10:30).
+// Kept a little past 13:00 so a late scalp/edge case still reaches the engine
+// and gets a *reasoned* skip in the log rather than a silent window miss.
+const ENTER_TO   = 13 * 60 + 30;
 const hhmm = (m) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
 
 // ── IST helpers (same idiom as src/lib/ist.js — correct on any machine zone) ──

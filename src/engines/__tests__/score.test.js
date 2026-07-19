@@ -62,12 +62,16 @@ function bullOi() {
 
 const vix = { ok: true, source: "dhan", vix: { ltp: 13, changePct: -1.5 } };
 
+// 10:30 IST — inside every style's entry window, so the time-of-day gate never
+// makes these assertions depend on when the suite happens to run.
+const AT_1030 = 10 * 60 + 30;
+
 describe("scoreOption — bullish confluence", () => {
   const r = scoreOption({
     underlying: "NIFTY50",
     candles5m: trendUp(), candles15m: trendUp(), candles1H: trendUp(),
     chain: bullChain(), oi: bullOi(), vix,
-    history: [], events: {}, mm: { capital: 400000, rr: 2 }, riskPct: 1,
+    history: [], events: {}, mm: { capital: 400000, rr: 2 }, riskPct: 1, nowMin: AT_1030,
   });
 
   it("returns a well-formed result", () => {
@@ -130,7 +134,7 @@ describe("scoreOption — OI as the lead voice (2026-07-19 rebalance)", () => {
       underlying: "NIFTY50",
       candles5m: trendUp(), candles15m: trendUp(), candles1H: trendUp(),
       chain: bullChain(), oi: hostileOi, vix,
-      history: [], events: {}, mm: { capital: 400000, rr: 2 }, riskPct: 1,
+      history: [], events: {}, mm: { capital: 400000, rr: 2 }, riskPct: 1, nowMin: AT_1030,
     });
     // Bullish tape, strongly bearish writers → stand aside, don't fight.
     expect(r.verdict).toBe("NO_TRADE");
@@ -158,6 +162,37 @@ describe("scoreOption — OI as the lead voice (2026-07-19 rebalance)", () => {
   it("Chain & OI carries the largest default weight", () => {
     const max = Math.max(...Object.values(DEFAULT_WEIGHTS));
     expect(DEFAULT_WEIGHTS.chainOi).toBe(max);
+  });
+});
+
+describe("scoreOption — data-driven entry windows", () => {
+  const at = (nowMin, style) => scoreOption({
+    underlying: "NIFTY50", candles5m: trendUp(), candles15m: trendUp(), candles1H: trendUp(),
+    chain: bullChain(), oi: bullOi(), vix, history: [], style, nowMin,
+    mm: { capital: 400000, rr: 2 }, riskPct: 1,
+  });
+  const cutoffGate = (r) => r.gates.some(g => /entry cutoff|scalp window/i.test(g));
+
+  it("allows an INTRADAY entry in the morning", () => {
+    expect(cutoffGate(at(10 * 60 + 30, "INTRADAY"))).toBe(false);
+  });
+
+  it("blocks INTRADAY/SWING entries after 13:00 (negative-expectancy afternoon)", () => {
+    const r = at(13 * 60 + 30, "INTRADAY");
+    expect(cutoffGate(r)).toBe(true);
+    expect(r.verdict).toBe("NO_TRADE");
+    expect(cutoffGate(at(14 * 60, "SWING"))).toBe(true);
+  });
+
+  it("restricts SCALP to the 10:00–10:30 window", () => {
+    expect(cutoffGate(at(10 * 60 + 15, "SCALP"))).toBe(false);   // inside
+    expect(cutoffGate(at(11 * 60, "SCALP"))).toBe(true);         // after
+    expect(cutoffGate(at(9 * 60 + 45, "SCALP"))).toBe(true);     // before
+  });
+
+  it("does not gate on time when the market is closed (research/preview scoring)", () => {
+    expect(cutoffGate(at(20 * 60, "INTRADAY"))).toBe(false);
+    expect(cutoffGate(at(7 * 60, "SCALP"))).toBe(false);
   });
 });
 
