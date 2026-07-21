@@ -4223,7 +4223,17 @@ function HistoryPage({ history: allHistory, setHistory }) {
   // engine, which had no strike/premium) may still sit in localStorage — filter
   // them out so the archive shows option trades only. Non-destructive: setHistory
   // still writes the full store; this just scopes what History displays.
-  const history = useMemo(() => (allHistory || []).filter(isOptionPaperTrade), [allHistory]);
+  // The headless scanner writes strategy-lab/paper/auto_paper_trades.json and
+  // never touches localStorage, so a browser that has taken no manual paper
+  // trades showed an EMPTY History page while the scanner held a full record.
+  // Merge its trades in for display, newest first. Display-only: setHistory,
+  // updateOutcome and clearAll still operate on the browser store alone.
+  const [autoTrades, setAutoTrades] = useState([]);
+  const history = useMemo(() => {
+    const byId = new Map((allHistory || []).filter(isOptionPaperTrade).map(r => [r.id, r]));
+    autoTrades.forEach(t => byId.set(t.id, { ...byId.get(t.id), ...t, origin: AUTO_ORIGIN }));
+    return [...byId.values()].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+  }, [allHistory, autoTrades]);
   const [filterAsset, setFilterAsset]     = useState("ALL");
   const [filterOutcome, setFilterOutcome] = useState("ALL");
   const [filterNature, setFilterNature]   = useState("ALL");
@@ -4249,18 +4259,36 @@ function HistoryPage({ history: allHistory, setHistory }) {
     setLastSync(Date.now());
   }, [setHistory]);
 
+  // Pull the scanner's own track record (bridge-served file). Kept separate
+  // from refreshOutcomes: that resolver only ever touches localStorage records.
+  const refreshAuto = useCallback(async () => {
+    try {
+      const r = await fetchAutoPaperTrades();
+      if (r && r.ok !== false && Array.isArray(r.trades)) {
+        setAutoTrades(r.trades.filter(isOptionPaperTrade));
+      }
+    } catch { /* bridge offline — keep whatever we already showed */ }
+  }, []);
+
   // On mount: load history, then resolve; refresh every 20s while open.
   useEffect(() => {
     setLoading(true);
     loadHistory().then(h => { setHistory(h); setLoading(false); refreshOutcomes(); });
-    const iv = setInterval(refreshOutcomes, 20000);
+    refreshAuto();
+    const iv = setInterval(() => { refreshOutcomes(); refreshAuto(); }, 20000);
     return () => clearInterval(iv);
-  }, [refreshOutcomes, setHistory]);
+  }, [refreshOutcomes, refreshAuto, setHistory]);
 
   const setManualOutcome = async (id, outcome) => { setHistory(await updateOutcome(id, outcome)); };
 
   const clearAll = async () => {
-    if (!window.confirm("Clear all AlphaEdge signal history?")) return;
+    // Only the browser store is clearable here — the scanner's file is its own
+    // track record and stays put, so say so rather than implying a full wipe.
+    if (!window.confirm(
+      "Clear manually-logged AlphaEdge signal history?\n\n"
+      + "The Auto-Scanner's own record (strategy-lab/paper/auto_paper_trades.json) "
+      + "is NOT affected and will still be listed."
+    )) return;
     try { localStorage.setItem(HISTORY_KEY, JSON.stringify([])); } catch {}
     try { localStorage.removeItem(SIGNAL_LEARNING_KEY); } catch {}
     setHistory([]);
@@ -4311,12 +4339,13 @@ function HistoryPage({ history: allHistory, setHistory }) {
     const groups = {};
     resolved.forEach(s => {
       const key = keyFn(s) || "—";
-      if (!groups[key]) groups[key] = { key, trades:0, wins:0, losses:0, netR:0, netUsd:0, sumRR:0, rrN:0 };
+      if (!groups[key]) groups[key] = { key, trades:0, wins:0, losses:0, netR:0, netRs:0, sumRR:0, rrN:0 };
       const g = groups[key];
       g.trades += 1;
       if (isWinSignal(s))  g.wins += 1;
       if (isLossSignal(s)) g.losses += 1;
       g.netR += signalPnlR(s);
+      g.netRs += Number(s.pnlRs || 0);   // real premium-path P&L, net of costs
       const rr = Number(s.riskReward||0); if (rr>0){ g.sumRR += rr; g.rrN += 1; }
     });
     return Object.values(groups).map(g => ({ ...g,
@@ -4492,11 +4521,20 @@ function HistoryPage({ history: allHistory, setHistory }) {
                                     {sig.resolvedBy
                                       ? <>Auto-resolved ({sig.resolvedBy}{Number.isFinite(Number(sig.resolvedPrice))?` @ ${fmtPx(sig.resolvedPrice)}`:""}).</>
                                       : "Paper signal — mark manually or wait for the auto-resolver."}
+                                    {/* Scanner rows live in its own file, not localStorage —
+                                        updateOutcome() would silently no-op on them, so show
+                                        why the controls are absent instead of dead buttons. */}
+                                    {tradeOrigin(sig) === AUTO_ORIGIN ? (
+                                      <div style={{marginTop:6,fontSize:8,color:"#64748b"}}>
+                                        Auto-Scanner record — resolved from the premium series; not editable here.
+                                      </div>
+                                    ) : (
                                     <div style={{marginTop:6,display:"flex",gap:3,flexWrap:"wrap"}}>
                                       {[["pending","PEND"],["win","WIN"],["loss","LOSS"]].map(([v,l])=>(
                                         <button key={v} onClick={(e)=>{e.stopPropagation();setManualOutcome(sig.id,v);}} style={{fontSize:8,padding:"2px 7px",borderRadius:4,cursor:"pointer",fontFamily:"monospace",fontWeight:700,background:sig.outcome===v?(outcomeColor[v]||"#64748b")+"30":"#0a1628",color:sig.outcome===v?(outcomeColor[v]||"#94a3b8"):"#64748b",border:`0.5px solid ${sig.outcome===v?(outcomeColor[v]||"#64748b")+"70":"#1e3a5a"}`}}>{l}</button>
                                       ))}
                                     </div>
+                                    )}
                                   </div>
                                 </div>
                                 <div style={{background:"#060d17",border:"0.5px solid #1e3a5a",borderRadius:8,padding:"10px 12px"}}>
@@ -4527,7 +4565,7 @@ function HistoryPage({ history: allHistory, setHistory }) {
             <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10,flexWrap:"wrap"}}>
               <span style={{fontSize:12,fontWeight:700,color:"#22c55e"}}>📊 Performance Record</span>
               <span style={{fontSize:10,color:"#7c8ea8"}}>What's actually profitable — from {resolved.length} resolved trade{resolved.length!==1?"s":""}</span>
-              <span style={{marginLeft:"auto",fontSize:9,color:"#64748b"}}>green ✓ = net positive · Net R from R-multiples · $ from MT5</span>
+              <span style={{marginLeft:"auto",fontSize:9,color:"#64748b"}}>green ✓ = net positive · Net R from R-multiples · ₹ = premium path, net of costs</span>
             </div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:10}}>
               {perfTables.map(({title,keyLabel,rows})=>{
@@ -4541,7 +4579,7 @@ function HistoryPage({ history: allHistory, setHistory }) {
                     <div style={{overflowX:"auto"}}>
                       <table style={{width:"100%",borderCollapse:"collapse",minWidth:330}}>
                         <thead><tr style={{background:"#07111f"}}>
-                          {[keyLabel,"Trades","Win%","Avg RR","Net R",""].map(h=>(
+                          {[keyLabel,"Trades","Win%","Avg RR","Net R","Net ₹",""].map(h=>(
                             <th key={h} style={{padding:"6px 7px",textAlign:h===keyLabel?"left":"right",fontSize:8,color:"#7c8ea8",letterSpacing:"0.04em",borderBottom:"0.5px solid #1e3a5a",whiteSpace:"nowrap"}}>{h.toUpperCase()}</th>
                           ))}
                         </tr></thead>
@@ -4553,10 +4591,12 @@ function HistoryPage({ history: allHistory, setHistory }) {
                               <td style={{padding:"7px 7px",fontSize:10,textAlign:"right",fontFamily:"monospace",color:wrColor(g.winRate)}}>{g.winRate.toFixed(0)}%</td>
                               <td style={{padding:"7px 7px",fontSize:10,color:"#60a5fa",textAlign:"right",fontFamily:"monospace"}}>{g.avgRR?`1:${g.avgRR.toFixed(1)}`:"—"}</td>
                               <td style={{padding:"7px 7px",fontSize:10,textAlign:"right",fontFamily:"monospace",fontWeight:800,color:good?"#22c55e":"#ef4444"}}>{good?"+":""}{g.netR.toFixed(1)}</td>
+                              {/* Real money, net of Dhan F&O costs — the line to trust over Net R. */}
+                              <td style={{padding:"7px 7px",fontSize:10,textAlign:"right",fontFamily:"monospace",fontWeight:800,color:g.netRs>0?"#22c55e":g.netRs<0?"#ef4444":"#64748b"}}>{g.netRs?`${g.netRs>0?"+":"−"}₹${Math.abs(Math.round(g.netRs)).toLocaleString("en-IN")}`:"—"}</td>
                               <td style={{padding:"7px 5px",fontSize:10,textAlign:"center"}}>{good?<span style={{color:"#22c55e"}}>✓</span>:<span style={{color:"#ef4444"}}>✕</span>}</td>
                             </tr>
                           );})}
-                          {rows.length===0 && <tr><td colSpan={6} style={{padding:14,textAlign:"center",fontSize:10,color:"#64748b"}}>No data yet</td></tr>}
+                          {rows.length===0 && <tr><td colSpan={7} style={{padding:14,textAlign:"center",fontSize:10,color:"#64748b"}}>No data yet</td></tr>}
                         </tbody>
                       </table>
                     </div>
