@@ -70,16 +70,6 @@ export function buildLevelMap({ underlying, candles15m, spot, oi = null }) {
     }
   }
 
-  // Full-window extremes — the multi-session shelf/ceiling. Fractal swings
-  // plus the last-8 recency cap lose these in a breakdown/breakout: after a
-  // rally every recent swing low sits ABOVE price, so the support side of
-  // the map degrades to round numbers exactly when location matters most.
-  // 2026-07-22: FINNIFTY bounced at 26,214 with the window low at 26,211.65
-  // and SENSEX at 76,819 with the window low at 76,800 — neither was in the
-  // map; both PE targets reached far beyond them.
-  raw.push({ price: Math.min(...candles15m.map(c => c.low)),  kind: "win-low",  strength: 1.4 });
-  raw.push({ price: Math.max(...candles15m.map(c => c.high)), kind: "win-high", strength: 1.4 });
-
   // Round numbers around spot (±3 minor steps; majors count more).
   const rs = ROUND_STEPS[underlying] || { step: 100, major: 500 };
   const base = Math.round(spot / rs.step) * rs.step;
