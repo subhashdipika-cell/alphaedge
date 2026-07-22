@@ -347,7 +347,16 @@ export function scoreOption(inputs) {
       ? `Outside the scalp window ${hhmm(win.from)}–${hhmm(win.to)} — scalps only clear costs there (backtest)`
       : `Past the ${hhmm(win.to)} entry cutoff — afternoon ${style.toLowerCase()} entries are negative-expectancy (backtest)`);
   }
-  if (!regime.favorable && (regime.regime === "RANGE" || regime.regime === "VOL_COMPRESSION")) gates.push(`Regime ${regime.label} — buyer-hostile`);
+  // Any unfavorable regime vetoes — the regime engine's stated contract
+  // ("Unfavorable regimes veto the score engine"), but only RANGE and
+  // VOL_COMPRESSION were ever wired in. MIXED and EXPIRY leaked through:
+  // 13 of the first 16 auto-paper trades fired in those two regimes at
+  // 15% WR for -Rs15,982 (79% of all losses).
+  // Exception: a tight SCALP on expiry day stays allowed — that's the
+  // deliberate 0-DTE half-size scalp path (see score.test.js hard gates).
+  if (!regime.favorable && !(regime.regime === "EXPIRY" && style === "SCALP")) {
+    gates.push(`Regime ${regime.label} — not favorable for option buying`);
+  }
 
   const session = marketSessionQuality(underlying);
 
