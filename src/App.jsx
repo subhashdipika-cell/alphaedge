@@ -4210,6 +4210,7 @@ async function autoResolveFromPrice() {
   });
   if (changed) {
     await saveHistory(next);
+    await autoJournalCompletedTrades(next);
     // Same retrain hook as a manual outcome mark — resolved results feed the
     // signal-learning profile ("expired" is excluded by isResolvedSignal).
     try { saveSignalLearning(next); } catch { /* ignore */ }
@@ -4265,6 +4266,7 @@ function HistoryPage({ history: allHistory, setHistory }) {
     try {
       const r = await fetchAutoPaperTrades();
       if (r && r.ok !== false && Array.isArray(r.trades)) {
+        await autoJournalCompletedTrades(r.trades);
         setAutoTrades(r.trades.filter(isOptionPaperTrade));
       }
     } catch { /* bridge offline — keep whatever we already showed */ }
@@ -4279,7 +4281,11 @@ function HistoryPage({ history: allHistory, setHistory }) {
     return () => clearInterval(iv);
   }, [refreshOutcomes, refreshAuto, setHistory]);
 
-  const setManualOutcome = async (id, outcome) => { setHistory(await updateOutcome(id, outcome)); };
+  const setManualOutcome = async (id, outcome) => {
+    const next = await updateOutcome(id, outcome);
+    await autoJournalCompletedTrades(next);
+    setHistory(next);
+  };
 
   const clearAll = async () => {
     // Only the browser store is clearable here — the scanner's file is its own
@@ -4908,10 +4914,46 @@ async function saveJournal(entries) {
   return entries;
 }
 
+// Idempotent bridge from completed trade records to the psychology journal.
+// It handles browser paper trades, headless scanner trades, and future live
+// records without creating duplicates when polling or reopening the app.
+let journalAutoQueue = Promise.resolve();
+function autoJournalCompletedTrades(trades = []) {
+  const completed = trades.filter(t => t && t.id &&
+    ["win", "loss", "expired", "breakeven"].includes(t.outcome) &&
+    (t.tradeType === "Paper" || t.tradeType === "Live" || t.source === "Auto-Scan" || t.source === "Live"));
+  if (!completed.length) return journalAutoQueue;
+  journalAutoQueue = journalAutoQueue.then(async () => {
+    const existing = await loadJournal();
+    const known = new Set(existing.map(e => e.tradeId).filter(Boolean));
+    const additions = completed.filter(t => !known.has(t.id)).map(t => {
+      const pnl = Number(t.pnlRs ?? t.pnl ?? 0) || 0;
+      const outcome = t.outcome === "expired" ? "breakeven" : t.outcome;
+      const tags = ["auto", t.tradeType === "Live" || t.source === "Live" ? "live" : "paper", outcome];
+      if (t.exitReason) tags.push(String(t.exitReason).replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-|-$/g, "").toLowerCase());
+      return {
+        id: `JE-TRADE-${t.id}`, tradeId: t.id, createdAt: Date.now(),
+        date: new Date(Number(t.resolvedAt || t.timestamp || Date.now())).toISOString().slice(0, 10),
+        asset: t.asset || t.assetId || "Unknown", session: t.session || "Indian market",
+        pnl, outcome, source: t.tradeType || t.source || "Trade", tags: [...new Set(tags)],
+        notes: [
+          `${outcome.toUpperCase()} ${t.tradeType || t.source || "trade"} completed automatically.`,
+          t.strike != null ? `Contract: ${t.strike}${t.direction || ""}${t.expiry ? ` · expiry ${t.expiry}` : ""}.` : null,
+          t.entryPremium != null || t.optionPremium != null ? `Premium: ₹${Number(t.entryPremium ?? t.optionPremium).toFixed(2)} → ₹${Number(t.exitPremium ?? 0).toFixed(2)}.` : null,
+          t.exitReason ? `Exit: ${t.exitReason}.` : null,
+          t.rMultiple != null ? `Realized R: ${Number(t.rMultiple).toFixed(2)}.` : null,
+        ].filter(Boolean).join(" "),
+      };
+    });
+    if (additions.length) await saveJournal([...additions, ...existing]);
+  }).catch(() => {});
+  return journalAutoQueue;
+}
+
 const EMOTIONS = ["Calm","Confident","Anxious","FOMO","Greedy","Disciplined","Hesitant","Overconfident"];
 const MISTAKES = ["Moved SL","Entered early","Chased price","Ignored plan","Over-leveraged","No setup","Revenge trade","None"];
 
-function JournalPage() {
+function JournalPageLegacy() {
   const [entries,   setEntries]   = useState([]);
   const [showForm,  setShowForm]  = useState(false);
   const [expanded,  setExpanded]  = useState(null);
@@ -5113,6 +5155,130 @@ function JournalPage() {
     </div>
   );
 }
+
+// IntelliTrade-style journal: a compact session log, recent-entry feed, and
+// on-demand monthly analysis. AlphaEdge keeps this local-first because the
+// browser journal has no dependency on a second backend service.
+function JournalPage() {
+  const [entries, setEntries] = useState([]);
+  const [form, setForm] = useState({
+    date: new Date().toISOString().slice(0, 10), asset: "NIFTY50",
+    session: "Morning", pnl: 0, tags: "", notes: "",
+  });
+  const [message, setMessage] = useState("");
+  const [analysis, setAnalysis] = useState(null);
+  const [analyzing, setAnalyzing] = useState(false);
+
+  const assets = ASSETS.map(a => a.label || a.id);
+  const sessions = ["Morning", "Midday", "Afternoon", "Expiry", "Post-market"];
+
+  useEffect(() => { loadJournal().then(setEntries); }, []);
+
+  const setField = (key, value) => setForm(f => ({ ...f, [key]: value }));
+  const save = async () => {
+    if (!form.date || !form.asset || !form.notes.trim()) {
+      setMessage("Add a date, asset, and notes before saving.");
+      return;
+    }
+    const entry = {
+      ...form, id: `JE-${Date.now()}`, createdAt: Date.now(),
+      pnl: Number(form.pnl) || 0,
+      tags: form.tags.split(",").map(t => t.trim()).filter(Boolean),
+    };
+    const saved = await saveJournal([entry, ...entries]);
+    setEntries(saved);
+    setForm(f => ({ ...f, pnl: 0, tags: "", notes: "" }));
+    setMessage("✓ Journal entry saved.");
+  };
+
+  const runAnalysis = () => {
+    setAnalyzing(true);
+    const month = new Date().toISOString().slice(0, 7);
+    const rows = entries.filter(e => String(e.date || "").startsWith(month));
+    const total = rows.reduce((s, e) => s + (Number(e.pnl) || 0), 0);
+    const wins = rows.filter(e => Number(e.pnl) > 0).length;
+    const group = key => rows.reduce((out, e) => {
+      const k = e[key] || "—";
+      const g = out[k] || { count: 0, pnl: 0, wins: 0 };
+      g.count += 1; g.pnl += Number(e.pnl) || 0; if (Number(e.pnl) > 0) g.wins += 1;
+      out[k] = g; return out;
+    }, {});
+    const byAsset = group("asset"), bySession = group("session");
+    const tagMap = {};
+    rows.forEach(e => (e.tags || []).forEach(tag => {
+      tagMap[tag] ||= { tag, count: 0, pnl: 0 };
+      tagMap[tag].count += 1; tagMap[tag].pnl += Number(e.pnl) || 0;
+    }));
+    const best = rows.length ? rows.reduce((a, b) => Number(a.pnl) >= Number(b.pnl) ? a : b) : null;
+    const worst = rows.length ? rows.reduce((a, b) => Number(a.pnl) <= Number(b.pnl) ? a : b) : null;
+    const strongest = Object.entries(byAsset).sort((a, b) => b[1].pnl - a[1].pnl)[0];
+    const weakest = Object.entries(byAsset).sort((a, b) => a[1].pnl - b[1].pnl)[0];
+    setAnalysis({ month, entries: rows.length, total, avg: rows.length ? total / rows.length : 0,
+      winRate: rows.length ? wins / rows.length * 100 : 0, byAsset, bySession,
+      tags: Object.values(tagMap).sort((a, b) => b.count - a.count), best, worst,
+      insights: rows.length ? [
+        strongest && `Strongest asset: ${strongest[0]} (${fmtInr(strongest[1].pnl)}).`,
+        weakest && weakest[1].pnl < 0 ? `Needs work: ${weakest[0]} (${fmtInr(weakest[1].pnl)}) — review these setups.` : null,
+      ].filter(Boolean) : [] });
+    setAnalyzing(false);
+  };
+
+  return (
+    <div style={{height:"100%",overflow:"auto",padding:"0 2px"}}>
+      <div style={{maxWidth:1100,display:"flex",flexDirection:"column",gap:14}}>
+        <h2 style={{fontSize:22,fontWeight:800,margin:0}}>Journal</h2>
+        <div style={{display:"grid",gridTemplateColumns:"minmax(300px,1fr) minmax(420px,2fr)",gap:14}}>
+          <div style={journalCard}>
+            <h3 style={journalTitle}>New Session Log</h3>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+              <JournalField label="Date"><input type="date" value={form.date} onChange={e=>setField("date",e.target.value)} style={journalInput}/></JournalField>
+              <JournalField label="Asset"><select value={form.asset} onChange={e=>setField("asset",e.target.value)} style={journalInput}>{assets.map(a=><option key={a}>{a}</option>)}</select></JournalField>
+              <JournalField label="Session"><select value={form.session} onChange={e=>setField("session",e.target.value)} style={journalInput}>{sessions.map(s=><option key={s}>{s}</option>)}</select></JournalField>
+              <JournalField label="Net P&L (₹)"><input type="number" step="0.01" value={form.pnl} onChange={e=>setField("pnl",e.target.value)} style={{...journalInput,fontFamily:"monospace"}}/></JournalField>
+            </div>
+            <JournalField label="Tags (comma-separated)"><input value={form.tags} placeholder="OI support, disciplined, expiry" onChange={e=>setField("tags",e.target.value)} style={journalInput}/></JournalField>
+            <JournalField label="Notes"><textarea rows={7} value={form.notes} placeholder="Observations, signal quality, execution, and what to improve…" onChange={e=>setField("notes",e.target.value)} style={{...journalInput,resize:"none"}}/></JournalField>
+            <button onClick={save} style={journalPrimary}>Save Journal Entry</button>
+            {message && <div style={{fontSize:10,color:"#94a3b8",marginTop:8}}>{message}</div>}
+          </div>
+          <div style={journalCard}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}><h3 style={{...journalTitle,marginBottom:0,color:"#e2e8f0"}}>Recent Entries</h3><span style={{fontSize:10,color:"#64748b"}}>{entries.length} local entries</span></div>
+            <div style={{display:"flex",flexDirection:"column",gap:9,maxHeight:490,overflowY:"auto",paddingRight:3}}>
+              {!entries.length && <div style={{fontSize:11,color:"#64748b"}}>No entries yet. Saved entries will appear here.</div>}
+              {entries.map(e=><div key={e.id || e.createdAt} style={{background:"#060d17",border:"0.5px solid #1e3a5a",borderRadius:8,padding:12}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10}}><div><span style={journalBadge}>{e.asset}</span><span style={{fontSize:10,color:"#64748b",marginLeft:8}}>{e.date} · {e.session}</span></div><span style={{fontSize:13,fontWeight:800,fontFamily:"monospace",color:Number(e.pnl)>=0?"#22c55e":"#f87171"}}>{fmtInr(Number(e.pnl)||0)}</span></div>
+                {e.notes || e.note ? <div style={{fontSize:11,color:"#94a3b8",lineHeight:1.5,marginTop:8}}>{e.notes || e.note}</div> : null}
+                <div style={{display:"flex",gap:5,flexWrap:"wrap",marginTop:8}}>{(Array.isArray(e.tags)?e.tags:[]).map(t=><span key={t} style={journalTag}>#{t}</span>)}</div>
+              </div>)}
+            </div>
+          </div>
+        </div>
+        <div style={{...journalCard,borderColor:"#4338ca80"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12}}><div><h3 style={{...journalTitle,color:"#818cf8",marginBottom:4}}>Monthly System Analysis</h3><div style={{fontSize:10,color:"#64748b"}}>Net P&L by asset, session, and tag — identify where AlphaEdge is improving.</div></div><button onClick={runAnalysis} disabled={analyzing} style={journalAnalysisButton}>{analyzing?"Analyzing…":"Run Analysis"}</button></div>
+          {analysis && !analysis.entries && <div style={{fontSize:11,color:"#64748b",marginTop:14}}>No entries for {analysis.month}.</div>}
+          {analysis && analysis.entries > 0 && <div style={{marginTop:16,display:"flex",flexDirection:"column",gap:18}}>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12}}>{[[`Entries (${analysis.month})`,analysis.entries,"#e2e8f0"],["Total P&L",fmtInr(analysis.total),analysis.total>=0?"#22c55e":"#f87171"],["Avg P&L",fmtInr(analysis.avg),analysis.avg>=0?"#22c55e":"#f87171"],["Win Rate",`${analysis.winRate.toFixed(1)}%`,"#60a5fa"]].map(([l,v,c])=><div key={l}><div style={journalLabel}>{l}</div><div style={{fontFamily:"monospace",fontSize:15,color:c,marginTop:3}}>{v}</div></div>)}</div>
+            {analysis.insights.length>0&&<div style={{background:"#060d17",border:"0.5px solid #1e3a5a",borderRadius:8,padding:12,fontSize:11,color:"#cbd5e1",lineHeight:1.6}}>{analysis.insights.map((x,i)=><div key={i}>• {x}</div>)}</div>}
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:18}}><JournalGroupTable title="By Asset" data={analysis.byAsset}/><JournalGroupTable title="By Session" data={analysis.bySession}/></div>
+            {analysis.tags.length>0&&<div><div style={journalLabel}>TAGS</div><div style={{display:"flex",gap:7,flexWrap:"wrap",marginTop:7}}>{analysis.tags.map(t=><span key={t.tag} style={journalTag}>#{t.tag} ×{t.count} <b style={{color:t.pnl>=0?"#22c55e":"#f87171"}}>{fmtInr(t.pnl)}</b></span>)}</div></div>}
+          </div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const journalCard={background:"#0a1628",border:"0.5px solid #1e3a5a",borderRadius:12,padding:16};
+const journalTitle={fontSize:12,fontWeight:700,color:"#f59e0b",margin:"0 0 14px",letterSpacing:"0.03em"};
+const journalInput={width:"100%",boxSizing:"border-box",background:"#060d17",border:"0.5px solid #1e3a5a",borderRadius:6,padding:"7px 9px",color:"#e2e8f0",fontSize:11,fontFamily:"monospace",outline:"none"};
+const journalPrimary={width:"100%",padding:"9px 12px",background:"#d97706",border:"none",borderRadius:7,color:"#fff",fontSize:11,fontWeight:800,cursor:"pointer"};
+const journalAnalysisButton={padding:"8px 16px",background:"#4f46e5",border:"none",borderRadius:7,color:"#fff",fontSize:11,fontWeight:800,cursor:"pointer"};
+const journalBadge={fontSize:10,fontWeight:700,padding:"3px 7px",background:"#1e293b",borderRadius:4,color:"#e2e8f0"};
+const journalTag={fontSize:10,padding:"3px 7px",background:"#1e1b4b",border:"0.5px solid #3730a3",borderRadius:999,color:"#818cf8"};
+const journalLabel={fontSize:9,color:"#64748b",letterSpacing:"0.08em",textTransform:"uppercase"};
+function JournalField({label,children}){return <div style={{display:"flex",flexDirection:"column",gap:4,marginBottom:10}}><label style={journalLabel}>{label}</label>{children}</div>}
+function JournalGroupTable({title,data}){return <div><div style={journalLabel}>{title}</div><table style={{width:"100%",borderCollapse:"collapse",fontSize:10,fontFamily:"monospace",marginTop:6}}><thead><tr style={{color:"#64748b",borderBottom:"0.5px solid #1e3a5a"}}><th style={{textAlign:"left",padding:"5px 0",fontWeight:500}}>Key</th><th style={{textAlign:"right",padding:"5px 0",fontWeight:500}}>Entries</th><th style={{textAlign:"right",padding:"5px 0",fontWeight:500}}>Win %</th><th style={{textAlign:"right",padding:"5px 0",fontWeight:500}}>Net P&L</th></tr></thead><tbody>{Object.entries(data).map(([key,g])=><tr key={key} style={{borderBottom:"0.5px solid #0f1b2d"}}><td style={{padding:"6px 0",color:"#cbd5e1"}}>{key}</td><td style={{padding:"6px 0",textAlign:"right",color:"#94a3b8"}}>{g.count}</td><td style={{padding:"6px 0",textAlign:"right",color:"#94a3b8"}}>{(g.wins/g.count*100).toFixed(1)}%</td><td style={{padding:"6px 0",textAlign:"right",color:g.pnl>=0?"#22c55e":"#f87171"}}>{fmtInr(g.pnl)}</td></tr>)}</tbody></table></div>}
+function fmtInr(v){return `${v>=0?"+":"−"}₹${Math.abs(Number(v)||0).toFixed(2)}`;}
 
 // ─── ANALYTICS PAGE ───────────────────────────────────────────────────────────
 function AnalyticsPage({ candles, prices, history }) {
@@ -5449,8 +5615,17 @@ export default function AlphaEdge() {
 
   // Load history from storage on mount + purge expired
   useEffect(()=>{
-    loadHistory().then(h=>setHistory(h));
+    loadHistory().then(async h=>{ await autoJournalCompletedTrades(h); setHistory(h); });
   },[]);
+
+  // PaperTrades can close a position from its own page component. Listen for
+  // that completion event so the journal updates immediately, not only on the
+  // next background resolver poll.
+  useEffect(() => {
+    const onCompleted = e => { autoJournalCompletedTrades([e.detail]); };
+    window.addEventListener("alphaedge:trade-completed", onCompleted);
+    return () => window.removeEventListener("alphaedge:trade-completed", onCompleted);
+  }, []);
 
   // App-wide outcome resolver (every 60s) — keeps outcomes and the cooldown
   // guardrails current on EVERY page. Option paper trades resolve against the
@@ -5461,7 +5636,7 @@ export default function AlphaEdge() {
       try {
         const cur = await loadHistory();
         const { changed, next } = await resolveOpenPaperTrades(cur);
-        if (alive && changed && next) { await saveHistory(next); setHistory(next); }
+        if (alive && changed && next) { await saveHistory(next); await autoJournalCompletedTrades(next); setHistory(next); }
       } catch { /* premium series offline — retry next tick */ }
       try {
         const { changed, next } = await autoResolveFromPrice();

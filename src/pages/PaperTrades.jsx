@@ -5,6 +5,7 @@ import { fetchPremiumSeries, fetchAutoPaperTrades } from "../data/bridge.js";
 import { sendPaperCloseAlert } from "../data/telegram.js";
 import { entryTsToUtc } from "../engines/resolve.js";
 import { netOptionPnl, exchangeFor } from "../engines/costs.js";
+import { IST_SHIFT_MS, isIndianMarketOpen } from "../lib/ist.js";
 
 // ─── PAPER TRADES — option paper-position blotter ─────────────────────────────
 // Recommendations accepted from the Option Score page are tracked here against
@@ -18,6 +19,55 @@ const C = {
 const fmt = (v, d = 2) => (Number.isFinite(Number(v)) ? Number(v).toLocaleString("en-IN", { maximumFractionDigits: d }) : "—");
 const fmtRs = (v) => (Number.isFinite(Number(v)) ? `${v >= 0 ? "+" : ""}₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}` : "—");
 const styleLabel = { SCALP: "Scalp", INTRADAY: "Intraday", SWING: "Swing" };
+
+// ─── Premium-feed staleness ───────────────────────────────────────────────────
+// The collector records ATM±N strikes, so a position whose strike drifts outside
+// that window simply stops being recorded — its premium series freezes. The old
+// UI kept rendering that last value as if it were live, which silently turned a
+// frozen number into a "running P&L" (observed 2026-07-23: BANKNIFTY 57100PE
+// showed +₹5,891 for over an hour after its feed went dark at 12:29 IST).
+// Anything older than this many minutes during market hours is called out.
+const STALE_AFTER_MIN = 4;
+
+const istNowMinutes = () => {
+  const d = new Date(Date.now() + IST_SHIFT_MS);
+  return d.getUTCHours() * 60 + d.getUTCMinutes();
+};
+// "HH:MM" (IST, as the bridge stamps each series point) → minutes stale, or null.
+function staleMinutes(hhmm) {
+  const parts = String(hhmm || "").split(":");
+  const h = Number(parts[0]), m = Number(parts[1]);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+  return Math.max(0, istNowMinutes() - (h * 60 + m));
+}
+// Only flag during market hours — after close every series is legitimately old.
+const isStale = (mins) => mins != null && mins > STALE_AFTER_MIN && isIndianMarketOpen();
+
+function LivePx({ px, at, entry }) {
+  const mins = staleMinutes(at);
+  const stale = isStale(mins);
+  if (!Number.isFinite(px)) return <td style={{ ...td, color: C.faint }}>…</td>;
+  return (
+    <td style={{ ...td, color: stale ? C.amber : px >= entry ? C.green : C.red }}
+        title={stale ? `Premium feed stale — last tick ${at} IST (${mins}m ago). This strike has likely drifted outside the collector's ATM±N window, so this is NOT a live price.` : `Last tick ${at} IST`}>
+      {fmt(px)}
+      {stale && <div style={{ fontSize: 8, color: C.amber }}>⚠ {at}</div>}
+    </td>
+  );
+}
+
+function LivePnl({ pnl, at }) {
+  const mins = staleMinutes(at);
+  const stale = isStale(mins);
+  if (pnl == null) return <td style={{ ...td, color: C.faint }}>…</td>;
+  return (
+    <td style={{ ...td, color: stale ? C.amber : pnl >= 0 ? C.green : C.red, fontWeight: 700 }}
+        title={stale ? `Stale — computed from the ${at} IST premium, ${mins}m old. Not a live P&L.` : undefined}>
+      {fmtRs(pnl)}
+      {stale && <div style={{ fontSize: 8, fontWeight: 400, color: C.amber }}>not live</div>}
+    </td>
+  );
+}
 
 function Card({ title, right, children, style }) {
   return (
@@ -60,7 +110,11 @@ export default function PaperTradesPage() {
       try {
         const type = t.direction || (t.bias === "BULLISH" ? "CE" : "PE");
         const r = await fetchPremiumSeries(t.assetId, t.strike, type, { expiry: t.expiry, sinceTs: entryTsToUtc(t.entryTs || t.timestamp) });
-        if (r?.ok && r.series?.length) prem[t.id] = r.last ?? r.series.at(-1).ltp;
+        // Keep the last point's IST stamp too — without it a frozen feed is
+        // indistinguishable from a live one that simply hasn't moved.
+        if (r?.ok && r.series?.length) {
+          prem[t.id] = { px: r.last ?? r.series.at(-1).ltp, at: r.series.at(-1).t || null };
+        }
       } catch { /* ignore */ }
     }));
     setLivePrem(prem);
@@ -88,14 +142,21 @@ export default function PaperTradesPage() {
 
   // Live P&L NET of estimated round-trip cost (brokerage + taxes).
   const livePnl = (t) => {
-    const p = livePrem[t.id];
+    const p = livePrem[t.id]?.px;
     if (!Number.isFinite(p)) return null;
     return netOptionPnl({ entryPremium: t.optionPremium || t.entry, exitPremium: p, qty: (t.lots || 0) * (t.lotSize || 0), exchange: exchangeFor(t.assetId) }).netRs;
   };
 
   const manualClose = async (t) => {
-    if (!window.confirm(`Close ${t.strike}${t.direction} manually? Marked at the last premium, net of costs.`)) return;
-    const p = livePrem[t.id] ?? t.optionPremium;
+    const q = livePrem[t.id];
+    const mins = staleMinutes(q?.at);
+    // Booking against a frozen premium writes a wrong P&L into the permanent
+    // record, so say so plainly rather than letting the number look current.
+    const warn = isStale(mins)
+      ? `\n\n⚠ The premium feed for this leg is STALE — last tick ${q.at} IST (${mins}m ago). Closing now books ₹${fmt(q.px)}, which is NOT the live price.`
+      : "";
+    if (!window.confirm(`Close ${t.strike}${t.direction} manually? Marked at the last premium, net of costs.${warn}`)) return;
+    const p = q?.px ?? t.optionPremium;
     const { grossRs, costRs, netRs } = netOptionPnl({ entryPremium: t.optionPremium || t.entry, exitPremium: p, qty: (t.lots || 0) * (t.lotSize || 0), exchange: exchangeFor(t.assetId) });
     const patch = {
       outcome: netRs >= 0 ? "win" : "loss", exitPremium: +Number(p).toFixed(2),
@@ -105,6 +166,7 @@ export default function PaperTradesPage() {
     };
     const next = (await loadHistory()).map(s => s.id === t.id ? { ...s, ...patch } : s);
     await saveHistory(next); setHistory(next);
+    window.dispatchEvent(new CustomEvent("alphaedge:trade-completed", { detail: { ...t, ...patch } }));
     sendPaperCloseAlert({ ...t, ...patch });   // Telegram on the actual close
   };
 
@@ -168,18 +230,17 @@ export default function PaperTradesPage() {
                     <thead><tr style={{ color: C.faint }}>{["Leg", "Style", "Entry ₹", "Live ₹", "SL ₹", "Target ₹", "Lots", "Running P&L", "Opened"].map(h => <th key={h} style={th}>{h}</th>)}</tr></thead>
                     <tbody>
                       {autoOpen.map(t => {
-                        const pnl = livePnl(t);
-                        const p = livePrem[t.id];
+                        const q = livePrem[t.id];
                         return (
                         <tr key={t.id} style={{ borderTop: `0.5px solid #0d1b2a` }}>
                           <td style={{ ...td, color: t.direction === "CE" ? C.green : C.red, fontWeight: 700 }}>{t.strike} {t.direction}<div style={{ fontSize: 8, color: C.faint }}>{t.assetId} · {t.expiry?.slice(5)}</div></td>
                           <td style={td}>{styleLabel[t.style] || "—"}</td>
                           <td style={td}>{fmt(t.optionPremium)}</td>
-                          <td style={{ ...td, color: Number.isFinite(p) ? (p >= t.optionPremium ? C.green : C.red) : C.faint }}>{Number.isFinite(p) ? fmt(p) : "…"}</td>
+                          <LivePx px={q?.px} at={q?.at} entry={t.optionPremium} />
                           <td style={{ ...td, color: C.red }}>{fmt(t.slPremium)}</td>
                           <td style={{ ...td, color: C.green }}>{fmt(t.tgtPremium)}</td>
                           <td style={td}>{t.lots}×{t.lotSize}</td>
-                          <td style={{ ...td, color: pnl == null ? C.faint : pnl >= 0 ? C.green : C.red, fontWeight: 700 }}>{pnl == null ? "…" : fmtRs(pnl)}</td>
+                          <LivePnl pnl={livePnl(t)} at={q?.at} />
                           <td style={{ ...td, color: C.faint }}>{new Date(t.timestamp).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}</td>
                         </tr>
                         );
@@ -230,18 +291,17 @@ export default function PaperTradesPage() {
                 </tr></thead>
                 <tbody>
                   {open.map(t => {
-                    const pnl = livePnl(t);
-                    const p = livePrem[t.id];
+                    const q = livePrem[t.id];
                     return (
                       <tr key={t.id} style={{ borderTop: `0.5px solid #0d1b2a` }}>
                         <td style={{ ...td, color: t.direction === "CE" ? C.green : C.red, fontWeight: 700 }}>{t.strike} {t.direction}<div style={{ fontSize: 8, color: C.faint }}>{t.assetId} · {t.expiry?.slice(5)}</div></td>
                         <td style={td}>{styleLabel[t.style] || "—"}</td>
                         <td style={td}>{fmt(t.optionPremium)}</td>
-                        <td style={{ ...td, color: Number.isFinite(p) ? (p >= t.optionPremium ? C.green : C.red) : C.faint }}>{Number.isFinite(p) ? fmt(p) : "…"}</td>
+                        <LivePx px={q?.px} at={q?.at} entry={t.optionPremium} />
                         <td style={{ ...td, color: C.red }}>{fmt(t.slPremium)}</td>
                         <td style={{ ...td, color: C.green }}>{fmt(t.tgtPremium)}</td>
                         <td style={td}>{t.lots}×{t.lotSize}</td>
-                        <td style={{ ...td, color: pnl == null ? C.faint : pnl >= 0 ? C.green : C.red, fontWeight: 700 }}>{pnl == null ? "…" : fmtRs(pnl)}</td>
+                        <LivePnl pnl={livePnl(t)} at={q?.at} />
                         <td style={td}><button onClick={() => manualClose(t)} style={closeBtn}>close</button></td>
                       </tr>
                     );

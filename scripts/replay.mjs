@@ -19,6 +19,7 @@ import { fileURLToPath } from "url";
 import { analyzeOiTrend } from "../src/engines/oi.js";
 import { scoreOption } from "../src/engines/score.js";
 import { resolvePaperTrade } from "../src/engines/resolve.js";
+import { netOptionPnl, exchangeFor } from "../src/engines/costs.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -232,12 +233,28 @@ function replayDay({ file, underlying, date }, candleHist) {
   // Square off any still-open at day end (last snapshot premium).
   if (openTrade) {
     const ser = premiumSeries(snaps, openTrade.strike, openTrade.direction, openTrade.entryHHMM);
-    const lastPrem = ser.at(-1)?.ltp ?? openTrade.optionPremium;
-    trades.push({ ...openTrade, outcome: lastPrem >= openTrade.optionPremium ? "win" : "loss",
-      exitPremium: lastPrem, exitReason: "Day-end square-off", exitAt: snaps.at(-1).hhmm,
-      grossPnlRs: +((lastPrem - openTrade.optionPremium) * openTrade.lots * openTrade.lotSize).toFixed(2),
-      pnlRs: +((lastPrem - openTrade.optionPremium) * openTrade.lots * openTrade.lotSize).toFixed(2), costRs: 0,
-      rMultiple: (openTrade.optionPremium - openTrade.slPremium) ? +((lastPrem - openTrade.optionPremium) / (openTrade.optionPremium - openTrade.slPremium)).toFixed(2) : 0, date });
+    // Use the same resolver as intraday exits so day-end results include the
+    // bid-side exit and the complete Indian F&O cost model.
+    const settled = resolvePaperTrade({ ...openTrade, maxHoldMin: 0, squareOff: true }, ser);
+    if (settled) trades.push({ ...openTrade, ...settled, date });
+    else {
+      // Defensive fallback for malformed/incomplete CSVs: settle at the last
+      // observed bid/ltp, but never silently report a zero-cost result.
+      const last = ser.at(-1) || {};
+      const lastPrem = Number(last.bid ?? last.ltp ?? openTrade.optionPremium) || openTrade.optionPremium;
+      const net = netOptionPnl({
+        entryPremium: openTrade.optionPremium,
+        exitPremium: lastPrem,
+        qty: openTrade.lots * openTrade.lotSize,
+        exchange: exchangeFor(openTrade.underlying),
+      });
+      const fallback = { ...openTrade, outcome: lastPrem >= openTrade.optionPremium ? "win" : "loss",
+        exitPremium: lastPrem, exitReason: "Day-end square-off (fallback)", exitAt: snaps.at(-1).hhmm,
+        grossPnlRs: net.grossRs, pnlRs: net.netRs, costRs: net.costRs,
+        rMultiple: (openTrade.optionPremium - openTrade.slPremium) ? +((lastPrem - openTrade.optionPremium) / (openTrade.optionPremium - openTrade.slPremium)).toFixed(2) : 0, date };
+      trades.push(fallback);
+      console.warn(`  ${openTrade.id}: resolver could not settle final snapshot; applied cost-aware fallback`);
+    }
   }
   return trades;
 }

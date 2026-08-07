@@ -10,10 +10,21 @@ export const MAX_SIGNAL_RISK_PCT = 1;
 
 export function outcomeBucket(signalOrOutcome) {
   const outcome = typeof signalOrOutcome === "string" ? signalOrOutcome : signalOrOutcome?.outcome;
-  if (outcome === "win") {
-    const rr = typeof signalOrOutcome === "object" ? Number(signalOrOutcome?.riskReward || 0) : 0;
-    return rr >= MIN_BIG_PROFIT_RR ? "big_profit" : "small_profit";
+  if (typeof signalOrOutcome === "object" && (outcome === "win" || outcome === "loss")) {
+    // Classification must use realized R, not the planned target. A trade that
+    // was planned for 3R but exited at +0.4R is a small profit, not a big one.
+    const realizedR = Number(signalOrOutcome?.rMultiple);
+    if (Number.isFinite(realizedR)) {
+      if (realizedR >= MIN_BIG_PROFIT_RR) return "big_profit";
+      if (realizedR > 0) return "small_profit";
+      if (realizedR < -1) return "big_loss";
+      return "small_loss";
+    }
+    // Legacy records without realized R retain conservative semantics: wins
+    // are small profits unless explicitly marked otherwise.
+    return outcome === "win" ? "small_profit" : "small_loss";
   }
+  if (outcome === "win") return "small_profit";
   if (outcome === "loss") return "small_loss";
   return outcome || "pending";
 }
@@ -32,6 +43,8 @@ export function isLossSignal(signal) {
 
 export function signalPnlR(signal) {
   const bucket = outcomeBucket(signal);
+  const realizedR = Number(signal?.rMultiple);
+  if (Number.isFinite(realizedR)) return realizedR;
   const rr = Math.max(Number(signal?.riskReward || 0), MIN_BIG_PROFIT_RR);
   if (bucket === "big_profit") return rr;
   if (bucket === "small_profit") return Math.max(0.5, Math.min(1.5, rr / 2));

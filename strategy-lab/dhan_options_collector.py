@@ -163,6 +163,42 @@ def append_rows(name: str, rows: list[dict]) -> int:
     return len(rows)
 
 
+OPEN_TRADES_FILE = HERE / "paper" / "auto_paper_trades.json"
+
+
+def open_trade_strikes(underlying: str, expiry: str) -> set[float]:
+    """Strikes of still-open paper trades on this underlying/expiry.
+
+    These are PINNED into every snapshot regardless of how far the underlying has
+    drifted from them. Without this, a position whose strike leaves the ATM+/-N
+    window simply stops being recorded: its premium series freezes, the running
+    P&L shown in the app is silently stale, and the resolver can never see the
+    target/SL touch, so the trade hangs open until the expiry fallback fires.
+    (Observed 2026-07-23: BANKNIFTY 57100PE went dark at 12:29 IST when spot fell
+    to 56,434 and the window became 55,900-56,900.)
+
+    Costs nothing extra at the API: the option-chain response already carries
+    every strike, so this only widens the slice that gets written.
+    """
+    try:
+        data = json.loads(OPEN_TRADES_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()   # no scanner record yet, or mid-write — never block a snapshot
+    pinned = set()
+    for t in data.get("trades", []) or []:
+        if (t.get("outcome") or "pending") != "pending":
+            continue
+        if str(t.get("assetId") or "").upper() != underlying.upper():
+            continue
+        if expiry and t.get("expiry") and t["expiry"] != expiry:
+            continue
+        try:
+            pinned.add(round(float(t["strike"]), 2))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return pinned
+
+
 def snapshot(dhan, name: str, meta: dict, expiry: str, atm_range: int) -> int:
     # Retry a throttled option-chain call: the bridge (app + scanner) shares this
     # Dhan account's ~1-req/3s limit, so a collision throttles us intermittently.
@@ -184,15 +220,29 @@ def snapshot(dhan, name: str, meta: dict, expiry: str, atm_range: int) -> int:
     if not oc_map or not under_ltp:
         return 0
 
-    # ATM strike = nearest strike to the underlying LTP; take ATM +/- atm_range.
+    # ATM strike = nearest strike to the underlying LTP; take ATM +/- atm_range,
+    # PLUS the strikes of any still-open paper trade (which may have drifted well
+    # outside that window — see open_trade_strikes).
     strikes = sorted(oc_map.keys(), key=lambda s: float(s))
     floats  = [float(s) for s in strikes]
     atm_i   = min(range(len(floats)), key=lambda i: abs(floats[i] - under_ltp))
     lo, hi  = max(0, atm_i - atm_range), min(len(strikes), atm_i + atm_range + 1)
+    selected = list(strikes[lo:hi])
+
+    pinned = open_trade_strikes(name, expiry)
+    if pinned:
+        in_window = {round(float(s), 2) for s in selected}
+        extra = [s for s in strikes if round(float(s), 2) in pinned - in_window]
+        if extra:
+            selected += extra
+            selected.sort(key=lambda s: float(s))
+            log(f"  {name}: pinned open-position strike(s) outside ATM window: "
+                f"{', '.join(str(int(float(s))) for s in extra)}")
+
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
     rows = []
-    for sk in strikes[lo:hi]:
+    for sk in selected:
         node = oc_map[sk]
         for typ in ("ce", "pe"):
             leg = node.get(typ) or {}
