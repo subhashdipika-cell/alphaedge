@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { zeroHeroPick, zeroHeroRecords, zeroHeroV2Pick, zeroHeroV2Records } from "../zerohero.js";
+import { zeroHeroPick, zeroHeroRecords, zeroHeroV2Pick, zeroHeroV2Records,
+  zeroHeroDivergencePick, zeroHeroDivergenceRecord } from "../zerohero.js";
 
 const IN_WINDOW = 14 * 60;         // 14:00 IST
 const upDay = Array.from({ length: 40 }, (_, i) => ({ close: 24100 + i * 6 }));
@@ -106,5 +107,58 @@ describe("zeroHeroV2Pick", () => {
     expect(recs[0].source).toBe("Zero-Hero-v2");
     expect(recs[0].slPremium).toBeGreaterThan(0);
     expect(recs[0].tgtPremium).toBeGreaterThan(recs[0].entry);
+  });
+});
+
+function divergenceCandles({ breakout = null } = {}) {
+  const rows = [];
+  for (let i = 0; i < 57; i++) {
+    const min = 9 * 60 + 15 + i * 5;
+    const ts = Date.UTC(2026, 6, 21, Math.floor((min - 330) / 60), (min - 330) % 60);
+    let close = 100;
+    if (i === 56 && breakout === "up") close = 105;
+    if (i === 56 && breakout === "down") close = 95;
+    rows.push({ ts, open: close, high: close + 1, low: close - 1, close, vol: 1000 });
+  }
+  return rows;
+}
+
+function divergenceChain({ expiryToday = true } = {}) {
+  return {
+    ok: true, isExpiryToday: expiryToday, expiry: "2026-07-21", under_ltp: 100,
+    strikes: [{ strike: 100, ce: { ltp: 20, bid: 20.4, ask: 20.5, oi: 10000, volume: 5000, delta: 0.5 },
+      pe: { ltp: 20, bid: 20.4, ask: 20.5, oi: 10000, volume: 5000, delta: -0.5 } }],
+  };
+}
+
+describe("zeroHeroDivergencePick", () => {
+  it("buys an ATM CE on the lagging index after driver breakout", () => {
+    const r = zeroHeroDivergencePick({ candlesA: divergenceCandles({ breakout: "up" }),
+      candlesB: divergenceCandles(), chainB: divergenceChain(), istMin: 14 * 60 });
+    expect(r.ok).toBe(true); expect(r.direction).toBe("CE"); expect(r.leg.strike).toBe(100);
+    expect(r.leg.stopPremium).toBe(10.25); expect(r.leg.targetPremium).toBe(123);
+  });
+
+  it("buys an ATM PE on the lagging index after driver breakdown", () => {
+    const r = zeroHeroDivergencePick({ candlesA: divergenceCandles({ breakout: "down" }),
+      candlesB: divergenceCandles(), chainB: divergenceChain(), istMin: 14 * 60 });
+    expect(r.ok).toBe(true); expect(r.direction).toBe("PE");
+  });
+
+  it("rejects simultaneous breakouts, missing candles, and non-expiry chains", () => {
+    expect(zeroHeroDivergencePick({ candlesA: divergenceCandles({ breakout: "up" }),
+      candlesB: divergenceCandles({ breakout: "up" }), chainB: divergenceChain(), istMin: 14 * 60 }).ok).toBe(false);
+    expect(zeroHeroDivergencePick({ candlesA: [], candlesB: [], chainB: divergenceChain(), istMin: 14 * 60 }).ok).toBe(false);
+    expect(zeroHeroDivergencePick({ candlesA: divergenceCandles({ breakout: "up" }),
+      candlesB: divergenceCandles(), chainB: divergenceChain({ expiryToday: false }), istMin: 14 * 60 }).ok).toBe(false);
+  });
+
+  it("records one paper trade with a strict 10R premium plan", () => {
+    const pick = zeroHeroDivergencePick({ candlesA: divergenceCandles({ breakout: "up" }),
+      candlesB: divergenceCandles(), chainB: divergenceChain(), istMin: 14 * 60 });
+    const record = zeroHeroDivergenceRecord({ pick, lotSize: 35, now: 123 });
+    expect(record.strategyVersion).toBe("zero-hero-divergence-v1");
+    expect(record.slPremium).toBe(10.25); expect(record.tgtPremium).toBe(123);
+    expect(record.lots).toBe(1); expect(record.source).toBe("Zero-Hero-Divergence");
   });
 });

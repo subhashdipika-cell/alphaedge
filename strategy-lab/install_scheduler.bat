@@ -9,7 +9,7 @@ echo Registering AlphaEdge Strategy Lab daily task...
 :: Point at the 3.12 VENV python: Smart App Control blocks the base 3.14 native
 :: wheels (pandas/MT5), so the venv (signed/reputable cp312 wheels) is required.
 schtasks /create /tn "AlphaEdge-StrategyLab" ^
-  /tr "D:\alphaedge\.venv\Scripts\python.exe D:\alphaedge\strategy-lab\run_daily.py --collect-hours 9 --max-dd 20" ^
+  /tr "D:\alphaedge\.venv\Scripts\python.exe D:\alphaedge\strategy-lab\run_daily.py --collect-hours 9 --max-dd 20 --zerohero-index-days 5" ^
   /sc daily /st 06:30 ^
   /ru "%USERNAME%" ^
   /rl HIGHEST ^

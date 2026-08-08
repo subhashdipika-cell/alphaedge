@@ -61,7 +61,8 @@ const { resolvePaperTrade, entryTsToUtc } = await import("../src/engines/resolve
 const { getMoneyMgt, getRiskPolicy } = await import("../src/state/settings.js");
 const { eventProximity } = await import("../src/data/events.js");
 const { sendPaperOpenAlert, sendPaperCloseAlert, tgConfigured } = await import("../src/data/telegram.js");
-const { zeroHeroPick, zeroHeroRecords, zeroHeroV2Pick, zeroHeroV2Records } = await import("../src/engines/zerohero.js");
+const { zeroHeroPick, zeroHeroRecords, zeroHeroV2Pick, zeroHeroV2Records,
+  zeroHeroDivergencePick, zeroHeroDivergenceRecord } = await import("../src/engines/zerohero.js");
 const { fetchOptionChain, getLotSize } = await import("../src/data/bridge.js");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -81,6 +82,7 @@ const CFG = {
   once: flag("once"),
   zeroHero: !flag("no-zerohero"),   // expiry-day lottery scalp (paper experiment)
   zeroHeroV2: flag("zerohero-v2"),  // chart-confirmed, opt-in paper experiment
+  zeroHeroDivergence: flag("zerohero-divergence"), // 14:00 pair-divergence paper experiment
   underlyings: (opt("underlying", "") ? [opt("underlying", "")] : ASSETS.map(a => a.id)),
 };
 const ENTER_FROM = 9 * 60 + 20;   // no new entries before 09:20 IST (skip the open auction chop)
@@ -89,6 +91,7 @@ const ENTER_FROM = 9 * 60 + 20;   // no new entries before 09:20 IST (skip the o
 // Kept a little past 13:00 so a late scalp/edge case still reaches the engine
 // and gets a *reasoned* skip in the log rather than a silent window miss.
 const ENTER_TO   = 13 * 60 + 30;
+const STRATEGY_WINDOW_TO = 14 * 60 + 45; // keeps the 14:00 Zero-Hero windows alive
 const hhmm = (m) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
 
 // ── IST helpers (same idiom as src/lib/ist.js — correct on any machine zone) ──
@@ -305,18 +308,48 @@ async function maybeZeroHeroV2(store, mins) {
   } catch (e) { log(`ZERO-HERO-V2 ${u}: error — ${e.message}`); }
 }
 
+async function maybeZeroHeroDivergence(store, mins) {
+  if (!CFG.zeroHeroDivergence || mins < 14 * 60 || mins > 14 * 60 + 4) return;
+  const indexA = "NIFTY50", indexB = "BANKNIFTY";
+  const today = istDateStr();
+  if (!CFG.underlyings.includes(indexA) || !CFG.underlyings.includes(indexB)) return;
+  if (store.trades.some(t => t.source === "Zero-Hero-Divergence" && t.expiry === today)) return;
+  if (store.trades.some(t => t.assetId === indexB && (t.outcome || "pending") === "pending")) return;
+  try {
+    const inputsA = _lastInputs.get(indexA) || await fetchScoreInputs(indexA, CFG.range, null);
+    const inputsB = _lastInputs.get(indexB) || await fetchScoreInputs(indexB, CFG.range, null);
+    // Fetch the front chain explicitly: fetchScoreInputs deliberately rolls
+    // expiry-day scoring to the next expiry for ordinary option workflows.
+    const [chainA, chainB] = await Promise.all([
+      fetchOptionChain(indexA, CFG.range, null), fetchOptionChain(indexB, CFG.range, null),
+    ]);
+    if (!chainA?.isExpiryToday || !chainB?.isExpiryToday) return;
+    const pick = zeroHeroDivergencePick({ indexA, indexB,
+      candlesA: inputsA.candles5m, candlesB: inputsB.candles5m,
+      chainB, istMin: mins });
+    if (!pick.ok) {
+      if (!/window|expiry day/.test(pick.reason)) log(`ZERO-HERO-DIVERGENCE skip — ${pick.reason}`);
+      return;
+    }
+    const record = zeroHeroDivergenceRecord({ pick, lotSize: getLotSize(indexB) });
+    store.trades.push(record);
+    log(`ZERO-HERO-DIVERGENCE OPENED ${indexA}→${indexB} ${pick.leg.strike}${pick.direction} @ ₹${pick.leg.entry} ASK · SL ₹${pick.leg.stopPremium} TGT ₹${pick.leg.targetPremium} (10R)`);
+    sendPaperOpenAlert(record);
+  } catch (e) { log(`ZERO-HERO-DIVERGENCE error — ${e.message}`); }
+}
+
 // ── one cycle: resolve, then (if in-session) scan for entries ──
 async function tick() {
   const store = loadStore();
   const resolved = await resolveOpen(store);
 
   const mins = istMinutes();
-  const inSession = mins >= ENTER_FROM && mins <= ENTER_TO;
+  const inSession = mins >= ENTER_FROM && mins <= STRATEGY_WINDOW_TO;
   const trading = inSession ? await isTradingDay() : false;
 
   if (!trading) {
     saveStore(store);
-    const why = mins < ENTER_FROM ? "pre-open" : mins > ENTER_TO ? `past ${hhmm(ENTER_TO)} entry cutoff` : "not a trading day";
+    const why = mins < ENTER_FROM ? "pre-open" : mins > STRATEGY_WINDOW_TO ? `past ${hhmm(STRATEGY_WINDOW_TO)} strategy window` : "not a trading day";
     log(`idle (${why}) · resolved ${resolved} · open ${store.summary.open}`);
     return store.summary;
   }
@@ -328,6 +361,7 @@ async function tick() {
   }
   await maybeZeroHero(store, mins);
   await maybeZeroHeroV2(store, mins);
+  await maybeZeroHeroDivergence(store, mins);
   saveStore(store);
   const s = store.summary;
   log(`scan ${CFG.underlyings.map((u, i) => `${u}:${notes[i]}`).join(" · ")} | open ${s.open} · resolved ${s.resolved} (${s.winRate}% WR, ${inr(s.netRs)})`);
@@ -345,6 +379,7 @@ async function main() {
   console.log(` PAPER ONLY — no broker orders. Entries ${hhmm(ENTER_FROM)}–${hhmm(ENTER_TO)} IST; 15:12 square-off.`);
   console.log(` telegram ${tgConfigured() ? "ON — alerts on paper open/close" : "off (set TG_BOT_TOKEN/TG_CHAT_ID or strategy-lab/telegram_config.json)"}`);
   console.log(` zero-hero ${CFG.zeroHero ? "ON — expiry days 14:00–14:45, ₹3–5 FADE-side lottery ×2 lots (--no-zerohero to disable)" : "off"}`);
+  console.log(` zero-hero-divergence ${CFG.zeroHeroDivergence ? "ON — NIFTY/BANKNIFTY 14:00 expiry-day divergence, ATM target, 10R" : "off (add --zerohero-divergence to enable)"}`);
   console.log("─".repeat(72));
 
   // Fail loudly if the bridge isn't up — the scanner is useless without it.

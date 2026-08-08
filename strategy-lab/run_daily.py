@@ -141,6 +141,32 @@ def run_dhan_collector(days: int):
     log("Dhan collection done.")
 
 
+def run_zerohero_index_collector(days: int):
+    """Refresh spot-index candles used by Zero-Hero divergence.
+
+    This intentionally does not start the option collector: the single
+    collector below owns the Dhan option-chain rate limit for the whole daily
+    pipeline. Option-chain history remains forward-only because Dhan does not
+    expose historical option-chain snapshots.
+    """
+    if not (ROOT / "dhan_config.json").exists():
+        log("Zero-Hero index refresh: no dhan_config.json found — skipping.")
+        return
+    log(f"Refreshing Zero-Hero spot index candles (last {days} days)...")
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(ROOT / "collect_zerohero_history.py"),
+             "--days", str(days), "--intervals", "1,5"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=600,
+        )
+        for line in (proc.stdout or "").splitlines():
+            print("  [zerohero-index]", line)
+        if proc.returncode:
+            log(f"Zero-Hero index refresh failed with exit code {proc.returncode}.")
+    except Exception as e:
+        log(f"Zero-Hero index refresh error: {e}")
+
+
 def run_analysis(max_dd: float) -> list[dict]:
     log(f"Running backtester (max DD = {max_dd}% of equity)...")
     from backtester import run_daily_analysis
@@ -256,6 +282,8 @@ def main():
                         help="Max drawdown as %% of equity (default 20%%)")
     parser.add_argument("--dhan-days", type=int, default=5,
                         help="Days of Dhan intraday history to pull (default 5)")
+    parser.add_argument("--zerohero-index-days", type=int, default=5,
+                        help="Days of NIFTY/BANKNIFTY spot candles to refresh (default 5)")
     args = parser.parse_args()
 
     log("=== Daily pipeline starting ===")
@@ -265,6 +293,7 @@ def main():
         log("Keep-awake ON — system held in working state during collection.")
         try:
             run_dhan_collector(days=args.dhan_days)
+            run_zerohero_index_collector(days=args.zerohero_index_days)
             opt_proc = start_options_collector()     # options-chain capture (self-gates on market hours)
             try:
                 wait_for_options_collector(opt_proc, hours=args.collect_hours)

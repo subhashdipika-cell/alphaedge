@@ -48,7 +48,7 @@ REM     This is what takes paper trades on its own - it scores all four indices
 REM     every ~5 min in-session and logs every TRADE-grade setup. Runs without
 REM     the browser; writes strategy-lab\paper\auto_paper_trades.json. ---
 echo  [3/4] Launching the autonomous paper-trade scanner...
-start "AlphaEdge Scanner" cmd /k "pushd ""%~dp0"" && node scripts\scanner.mjs --zerohero-v2"
+start "AlphaEdge Scanner" cmd /k "pushd ""%~dp0"" && node scripts\scanner.mjs --zerohero-v2 --zerohero-divergence"
 
 REM --- Window 4: the app UI (port 5001, opens your browser automatically) ---
 echo  [4/4] Launching the AlphaEdge app...

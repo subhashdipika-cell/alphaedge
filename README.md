@@ -97,12 +97,28 @@ market hours (it self-gates on the NSE session):
 
 ```bash
 python strategy-lab/dhan_options_collector.py
+
+# Zero-Hero divergence data collection
+python strategy-lab/collect_zerohero_history.py --days 365 --intervals 1,5
+# Include Dhan's historical expired-options rolling data:
+python strategy-lab/collect_zerohero_history.py --days 365 --expired-options
+# Then keep accumulating option-chain snapshots during market hours:
+python strategy-lab/collect_zerohero_history.py --no-index --live-options
 ```
+
+The Zero-Hero collector backfills NIFTY50/BANKNIFTY index candles from Dhan in
+90-day API chunks and writes a coverage manifest to
+`strategy-lab/data/zerohero_collection_manifest.json`. The `--expired-options`
+mode uses Dhan's rolling expired-options API in 30-day chunks and stores its
+OHLC/OI/IV/volume/spot data under `strategy-lab/data/expired_options/`. This is
+ATM-relative historical data, without historical bid/ask or Greeks; live
+option-chain snapshots remain useful for execution-quality validation.
 
 To backtest the score over the collected history (bridge must be running):
 
 ```bash
 node scripts/replay.mjs                 # writes strategy-lab/results/replay_*.json
+node scripts/backtest-zerohero-rolling.mjs  # Dhan rolling-option OHLC proxy
 ```
 
 ## Scripts

@@ -22,6 +22,7 @@ export const PROMOTION_STRATEGIES = [
   { key: "score-v1", label: "Legacy score strategies" },
   { key: "zero-hero-v1", label: "Zero-Hero" },
   { key: "zero-hero-v2", label: "Zero-Hero v2" },
+  { key: "zero-hero-divergence-v1", label: "Zero-Hero divergence" },
 ];
 
 export function outcomeBucket(signalOrOutcome) {

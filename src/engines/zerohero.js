@@ -155,3 +155,130 @@ export function zeroHeroV2Records({ underlying, pick, lotSize, now = Date.now() 
       tgtPremium: 0, takeProfit1: 0, trailStop: true, trailArmPts: Math.max(0.05, entry - sl), trailPts: Math.max(0.05, entry - sl) },
   ];
 }
+
+// 2:00 PM index-divergence Zero-Hero. This is intentionally a single-lot,
+// paper-only candidate: the driver index must break its pre-14:00 range while
+// the target index has not. The target option is ATM and its premium risk is
+// explicit: 50% stop and 10R target. The platform resolver still enforces its
+// global 15:12 IST square-off, even though the research specification names
+// 15:20 as the exchange-close exit.
+export const ZH_DIVERGENCE_DEFAULTS = {
+  executionMin: 14 * 60,
+  executionToleranceMin: 4,
+  referenceFromMin: 9 * 60 + 15,
+  minCandles: 30,
+  minPremium: 1,
+  maxPremium: 1000,
+  minDelta: 0.25,
+  maxDelta: 0.65,
+  maxSpreadPct: 0.03,
+  stopFraction: 0.50,
+  targetR: 10,
+};
+
+function candleStartMin(c) {
+  const ts = Number(c?.ts ?? c?.time ?? 0);
+  if (!Number.isFinite(ts) || ts <= 0) return null;
+  const d = new Date(ts);
+  return ((d.getUTCHours() * 60 + d.getUTCMinutes() + 330) % 1440);
+}
+
+function fiveMinuteAt1400(candles, executionMin) {
+  const rows = (candles || []).filter(c => {
+    const m = candleStartMin(c);
+    return m != null && m >= executionMin - 5 && m <= executionMin && Number(c.close) > 0;
+  });
+  // Prefer the last fully closed 13:55 candle if a live feed has already
+  // opened the 14:00 candle; partial candles must not influence the signal.
+  return rows.find(c => candleStartMin(c) === executionMin - 5) || rows.at(-1) || null;
+}
+
+function referenceRange(candles, signalStartMin, cfg) {
+  const rows = (candles || []).filter(c => {
+    const m = candleStartMin(c);
+    return m != null && m >= cfg.referenceFromMin && m < signalStartMin
+      && Number(c.high) > 0 && Number(c.low) > 0;
+  });
+  if (rows.length < cfg.minCandles) return null;
+  return {
+    high: Math.max(...rows.map(c => Number(c.high))),
+    low: Math.min(...rows.map(c => Number(c.low))),
+    count: rows.length,
+  };
+}
+
+function atmLeg(chain, direction, cfg) {
+  const side = direction === "CE" ? "ce" : "pe";
+  const spot = Number(chain?.under_ltp) || 0;
+  const candidates = (chain?.strikes || []).map(row => ({
+    strike: Number(row.strike), leg: row[side] || {},
+  })).filter(x => x.strike > 0 && x.leg.ltp > 0 && x.leg.bid > 0 && x.leg.ask > 0
+    && x.leg.ask >= x.leg.bid && x.leg.ltp >= cfg.minPremium && x.leg.ltp <= cfg.maxPremium
+    && Math.abs(Number(x.leg.delta) || 0) >= cfg.minDelta
+    && Math.abs(Number(x.leg.delta) || 0) <= cfg.maxDelta
+    && Number(x.leg.volume || 0) > 0 && Number(x.leg.oi || 0) > 0);
+  candidates.sort((a, b) => Math.abs(a.strike - spot) - Math.abs(b.strike - spot));
+  const selected = candidates[0];
+  if (!selected) return null;
+  const spreadPct = selected.leg.ask > 0
+    ? (selected.leg.ask - selected.leg.bid) / selected.leg.ask : 1;
+  if (spreadPct > cfg.maxSpreadPct) return null;
+  const entry = Number(selected.leg.ask);
+  const sl = +(entry * cfg.stopFraction).toFixed(2);
+  const risk = Math.max(0.05, entry - sl);
+  return {
+    strike: selected.strike, direction, optionType: direction, expiry: chain.expiry, spot,
+    entry, bid: Number(selected.leg.bid), ltp: Number(selected.leg.ltp),
+    oi: Number(selected.leg.oi) || 0, volume: Number(selected.leg.volume) || 0,
+    delta: Number(selected.leg.delta) || 0, spreadPct,
+    stopPremium: sl, targetPremium: +(entry + cfg.targetR * risk).toFixed(2),
+  };
+}
+
+export function zeroHeroDivergencePick({ indexA = "NIFTY50", indexB = "BANKNIFTY",
+  candlesA = [], candlesB = [], chainB, istMin, cfg = ZH_DIVERGENCE_DEFAULTS } = {}) {
+  if (!chainB?.ok || !chainB.strikes?.length) return { ok: false, reason: "no target-index option chain" };
+  if (!chainB.isExpiryToday) return { ok: false, reason: "not expiry day" };
+  if (istMin < cfg.executionMin || istMin > cfg.executionMin + cfg.executionToleranceMin)
+    return { ok: false, reason: "outside 14:00 divergence window" };
+  if (!Array.isArray(candlesA) || !Array.isArray(candlesB)) return { ok: false, reason: "missing index candles" };
+  const signalA = fiveMinuteAt1400(candlesA, cfg.executionMin);
+  const signalB = fiveMinuteAt1400(candlesB, cfg.executionMin);
+  if (!signalA || !signalB) return { ok: false, reason: "missing 14:00 index candle" };
+  const signalMin = candleStartMin(signalA);
+  const rangeA = referenceRange(candlesA, signalMin, cfg);
+  const rangeB = referenceRange(candlesB, signalMin, cfg);
+  if (!rangeA || !rangeB) return { ok: false, reason: "insufficient pre-14:00 reference candles" };
+
+  const closeA = Number(signalA.close), closeB = Number(signalB.close);
+  const aUp = closeA > rangeA.high, aDown = closeA < rangeA.low;
+  const bUp = closeB > rangeB.high, bDown = closeB < rangeB.low;
+  if ((aUp && bUp) || (aDown && bDown)) return { ok: false, reason: "both indices broke out; no divergence" };
+  const direction = aUp && closeB <= rangeB.high ? "CE"
+    : aDown && closeB >= rangeB.low ? "PE" : null;
+  if (!direction) return { ok: false, reason: "no qualifying index divergence" };
+  const leg = atmLeg(chainB, direction, cfg);
+  if (!leg) return { ok: false, reason: "no liquid ATM target option" };
+  return { ok: true, indexA, indexB, direction, leg,
+    signal: { closeA, closeB, rangeA, rangeB, signalMin, ts: signalA.ts },
+    reason: `${indexA} ${aUp ? "broke above" : "broke below"} its range while ${indexB} lagged; buy ${leg.strike}${direction}` };
+}
+
+export function zeroHeroDivergenceRecord({ pick, lotSize, now = Date.now() } = {}) {
+  const entry = pick.leg.entry;
+  const base = {
+    timestamp: now, entryTs: now, asset: pick.indexB, assetId: pick.indexB,
+    timeframe: "options", nature: "Scalping",
+    bias: pick.direction === "CE" ? "BULLISH" : "BEARISH", confidence: null,
+    entry, optionPremium: entry, stopLoss: pick.leg.stopPremium, slPremium: pick.leg.stopPremium,
+    tgtPremium: pick.leg.targetPremium, takeProfit1: pick.leg.targetPremium,
+    lots: 1, lotSize, maxHoldMin: null, squareOff: true,
+    expiry: pick.leg.expiry, strike: pick.leg.strike, direction: pick.direction,
+    regime: "EXPIRY_DIVERGENCE", style: "ZERO_HERO_DIVERGENCE",
+    strategyVersion: "zero-hero-divergence-v1", outcome: "pending",
+    source: "Zero-Hero-Divergence", tradeType: "Paper", riskReward: 10,
+    divergence: { driver: pick.indexA, target: pick.indexB, signal: pick.signal, reason: pick.reason },
+  };
+  return { ...base, id: `ZHD-${pick.indexA}-${pick.indexB}-${now}`,
+    setup: `2PM divergence ${pick.indexA} → ${pick.indexB} ${pick.leg.strike}${pick.direction} · 10R` };
+}
