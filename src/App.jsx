@@ -5839,6 +5839,7 @@ export default function AlphaEdge() {
         closePos: result.regime.priorDay.closePos,
       } : null,
       style: result.style?.style,
+      strategyVersion: result.underlying === "NIFTY50" ? "nifty-option-workflow-v1" : result.underlying === "SENSEX" ? "sensex-option-workflow-v1" : "score-v1",
       outcome: "pending",
       source: "Option Score",
       tradeType: "Paper",

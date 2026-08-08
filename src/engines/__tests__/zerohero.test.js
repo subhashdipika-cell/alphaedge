@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { zeroHeroPick, zeroHeroRecords } from "../zerohero.js";
+import { zeroHeroPick, zeroHeroRecords, zeroHeroV2Pick, zeroHeroV2Records } from "../zerohero.js";
 
 const IN_WINDOW = 14 * 60;         // 14:00 IST
 const upDay = Array.from({ length: 40 }, (_, i) => ({ close: 24100 + i * 6 }));
@@ -23,6 +23,18 @@ function chain({ expiryToday = true } = {}) {
     ],
   };
 }
+
+function v2Chain() {
+  const c = chain();
+  c.strikes = [{ strike: 24450, ce: { ltp: 4.6, oi: 50000, volume: 10000, delta: 0.2, bid: 4.55, ask: 4.65 }, pe: { ltp: 180, oi: 50000 } }];
+  return c;
+}
+
+const v2Oi = { ok: true, rows: [{ strike: 24450, ce: { oi: 50000, ltp: 4.6, ltpSeries: [3, 3.2, 3.5, 4, 4.6], volSeries: [100, 200, 300, 400, 500], delta: 0.2 }, pe: {} }] };
+const v2Candles = Array.from({ length: 80 }, (_, i) => {
+  const open = 24000 + i * 4, close = open + 4;
+  return { open, high: close + 3, low: open - 3, close, vol: 1000, ts: i * 300000 };
+});
 
 describe("zeroHeroPick", () => {
   it("FADES an up-trending expiry day (buys the PE) — spikes are reversal-driven", () => {
@@ -78,5 +90,21 @@ describe("zeroHeroRecords", () => {
       expect(r.source).toBe("Zero-Hero");
       expect(r.style).toBe("ZERO_HERO");
     }
+  });
+});
+
+describe("zeroHeroV2Pick", () => {
+  it("requires NIFTY context and selected-option premium breakout", () => {
+    const pick = zeroHeroV2Pick({ chain: v2Chain(), oi: v2Oi, candles5m: v2Candles, candles15m: v2Candles,
+      istMin: IN_WINDOW, cfg: { enterFromMin: IN_WINDOW, enterToMin: IN_WINDOW + 45, minPrem: 3, maxPrem: 5,
+        minOi: 5000, minIndexScore: 3, minDelta: 0.05, maxDelta: 0.35, maxSpreadPct: 0.08,
+        contextFromMin: IN_WINDOW, contextToMin: IN_WINDOW + 45 } });
+    expect(pick.ok).toBe(true);
+    expect(pick.direction).toBe("CE");
+    expect(pick.structure.confirmed).toBe(true);
+    const recs = zeroHeroV2Records({ underlying: "NIFTY50", pick, lotSize: 65 });
+    expect(recs[0].source).toBe("Zero-Hero-v2");
+    expect(recs[0].slPremium).toBeGreaterThan(0);
+    expect(recs[0].tgtPremium).toBeGreaterThan(recs[0].entry);
   });
 });

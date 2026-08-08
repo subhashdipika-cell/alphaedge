@@ -9,6 +9,9 @@
 //   node scripts/replay.mjs --underlying NIFTY50    # one underlying
 //   node scripts/replay.mjs --from 2026-06-23 --to 2026-07-14
 //   node scripts/replay.mjs --step 5 --risk 1 --capital 400000
+//   node scripts/replay.mjs --underlying NIFTY50 --research true
+//     (research-only: bypasses the production scalp entry-time window)
+//   node scripts/replay.mjs --variant legacy
 //
 // Writes strategy-lab/results/replay_{from}_{to}.json for the R&D page (served
 // by the bridge GET /rd/replay).
@@ -24,6 +27,7 @@ import { netOptionPnl, exchangeFor } from "../src/engines/costs.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
 const OPT_DIR = path.join(ROOT, "strategy-lab", "data", "options");
+const CANDLE_DIR = path.join(ROOT, "strategy-lab", "data");
 const OUT_DIR = path.join(ROOT, "strategy-lab", "results");
 const BRIDGE = process.env.BRIDGE_URL || "http://127.0.0.1:5000";
 
@@ -37,10 +41,49 @@ async function fetchCandles(underlying, tf, fromDate, toDate) {
       body: JSON.stringify({ instrument: underlying, tf, fromDate, toDate }),
     });
     const d = await r.json();
-    if (!d?.ok || !Array.isArray(d.candles)) return [];
-    return d.candles.map(k => ({ ts: Number(k.time) * 1000, open: +k.open, high: +k.high, low: +k.low, close: +k.close, bull: +k.close >= +k.open, vol: +k.volume || 0 }))
-      .filter(c => Number.isFinite(c.ts)).sort((a, b) => a.ts - b.ts);
-  } catch { return []; }
+    if (d?.ok && Array.isArray(d.candles) && d.candles.length) {
+      return d.candles.map(k => ({ ts: Number(k.time) * 1000, open: +k.open, high: +k.high, low: +k.low, close: +k.close, bull: +k.close >= +k.open, vol: +k.volume || 0 }))
+        .filter(c => Number.isFinite(c.ts)).sort((a, b) => a.ts - b.ts);
+    }
+  } catch { /* use the local Dhan candle archive below */ }
+  return localCandles(underlying, tf, fromDate, toDate);
+}
+
+function localRows(underlying, tf, fromDate, toDate) {
+  const files = fs.readdirSync(CANDLE_DIR)
+    .filter(f => f.startsWith(`${underlying}_${tf}_`) && f.endsWith(".csv"))
+    .filter(f => { const m = f.match(/_(\d{4}-\d{2}-\d{2})\.csv$/); return m && m[1] >= fromDate && m[1] <= toDate; });
+  const rows = [];
+  for (const file of files) rows.push(...readCsv(path.join(CANDLE_DIR, file)));
+  return rows;
+}
+
+function toCandle(r) {
+  const ts = new Date(String(r.time).replace(" ", "T") + "Z").getTime();
+  return { ts, open: +r.open, high: +r.high, low: +r.low, close: +r.close,
+    bull: +r.close >= +r.open, vol: +(r.real_volume || r.tick_volume || 0) };
+}
+
+function aggregateCandles(candles, minutes) {
+  const span = minutes * 60000, out = [];
+  for (const c of candles) {
+    const bucket = Math.floor(c.ts / span) * span, prev = out.at(-1);
+    if (!prev || prev.ts !== bucket) out.push({ ts: bucket, open: c.open, high: c.high, low: c.low,
+      close: c.close, bull: c.close >= c.open, vol: c.vol });
+    else { prev.high = Math.max(prev.high, c.high); prev.low = Math.min(prev.low, c.low);
+      prev.close = c.close; prev.bull = prev.close >= prev.open; prev.vol += c.vol; }
+  }
+  return out;
+}
+
+function localCandles(underlying, tf, fromDate, toDate) {
+  const sourceTf = tf === "15m" ? "M5" : tf === "5m" ? "M5" : "H1";
+  const candles = localRows(underlying, sourceTf, fromDate, toDate).map(toCandle)
+    .filter(c => Number.isFinite(c.ts)).sort((a, b) => a.ts - b.ts);
+  const result = tf === "15m" ? aggregateCandles(candles, 15) : candles;
+  const fromTs = new Date(`${fromDate}T00:00:00Z`).getTime();
+  const toTs = new Date(`${toDate}T23:59:59Z`).getTime();
+  return result.filter(c => c.ts >= fromTs && c.ts <= toTs);
 }
 const sliceTo = (arr, ts) => arr.filter(c => c.ts <= ts);
 const ymd = (d) => d.toISOString().slice(0, 10);
@@ -73,6 +116,12 @@ const CFG = {
   step: Number(opt("step", 5)),
   risk: Number(opt("risk", 1)),
   capital: Number(opt("capital", 400000)),
+  research: String(opt("research", "false")).toLowerCase() === "true",
+  indexScore: Number(opt("index-score", 4)),
+  minDelta: Number(opt("min-delta", 0.45)),
+  maxDelta: Number(opt("max-delta", 0.60)),
+  targetR: Number(opt("target-r", 1.8)),
+  variant: opt("variant", "current"),
 };
 
 const IST = 330;
@@ -106,6 +155,7 @@ function chainAt(snap, underlying) {
     const sk = Number(r.strike);
     (byStrike[sk] ||= {})[r.type.toLowerCase()] = {
       ltp: Number(r.ltp) || 0, oi: Number(r.oi) || 0, iv: +(Number(r.iv) || 0).toFixed(2),
+      volume: Number(r.volume) || 0,
       delta: +(Number(r.delta) || 0).toFixed(3), theta: +(Number(r.theta) || 0).toFixed(2),
       bid: Number(r.bid) || 0, ask: Number(r.ask) || 0,
     };
@@ -184,11 +234,13 @@ function replayDay({ file, underlying, date }, candleHist) {
   const isExpiryToday = snaps[0].legs[0].expiry === date;
   snaps.forEach(s => (s._isExpiryToday = isExpiryToday));
   const trades = [];
+  const diagnostics = { snapshots: snaps.length, sampled: 0, scoreCalls: 0, verdicts: {}, firstGates: {}, allGates: {} };
   let openTrade = null;
 
   for (let i = 0; i < snaps.length; i++) {
     const mins = hhmmToMin(snaps[i].hhmm);
     if (mins % CFG.step !== 0 && i !== 0) continue;      // sample every `step` minutes
+    diagnostics.sampled++;
 
     // Manage an open trade: resolve against remaining premium series.
     if (openTrade) {
@@ -209,11 +261,22 @@ function replayDay({ file, underlying, date }, candleHist) {
     const r = scoreOption({
       underlying, candles5m: c5, candles15m: c15, candles1H: c1h,
       chain, oi, vix: null, history: [], events: {}, mm: { capital: CFG.capital, rr: 2 }, riskPct: CFG.risk,
+      dhanOptionScalp: CFG.variant !== "legacy" && underlying === "NIFTY50",
+      sensexOptionWorkflow: CFG.variant !== "legacy" && underlying === "SENSEX",
+      ignoreEntryWindow: CFG.research,
+      legacyReplay: CFG.variant === "legacy",
+      niftyOptionScalpConfig: { minIndexScore: CFG.indexScore, minDelta: CFG.minDelta, maxDelta: CFG.maxDelta, targetR: CFG.targetR },
     });
+    diagnostics.scoreCalls++;
+    diagnostics.verdicts[r.verdict] = (diagnostics.verdicts[r.verdict] || 0) + 1;
+    if (r.verdict !== "TRADE" && r.gates?.[0]) diagnostics.firstGates[r.gates[0]] = (diagnostics.firstGates[r.gates[0]] || 0) + 1;
+    for (const gate of r.gates || []) diagnostics.allGates[gate] = (diagnostics.allGates[gate] || 0) + 1;
     if (r.verdict === "TRADE" && r.strike && r.plan && r.plan.lots >= 1) {
       // Enter at the strike's ask (slippage realism).
       const legRow = snaps[i].legs.find(x => Number(x.strike) === r.strike.strike && x.type === r.direction);
-      const entryPrem = legRow ? (Number(legRow.ask) || Number(legRow.ltp)) : r.strike.ltp;
+      const entryPrem = CFG.variant === "legacy"
+        ? (legRow ? Number(legRow.ltp) : r.strike.ltp)
+        : (legRow ? (Number(legRow.ask) || Number(legRow.ltp)) : r.strike.ltp);
       openTrade = {
         id: `RPL-${underlying}-${date}-${snaps[i].hhmm}`,
         entryTs: new Date(snaps[i].time.replace(" ", "T") + "Z").getTime(),
@@ -256,6 +319,7 @@ function replayDay({ file, underlying, date }, candleHist) {
       console.warn(`  ${openTrade.id}: resolver could not settle final snapshot; applied cost-aware fallback`);
     }
   }
+  trades.diagnostics = diagnostics;
   return trades;
 }
 
@@ -265,27 +329,42 @@ async function main() {
   if (!days.length) { console.error("No matching CSVs."); process.exit(1); }
   const from = days[0].date, to = days.at(-1).date;
   console.log(`Replaying ${days.length} day-file(s) (${from} → ${to})… candles per-day from the bridge.`);
-  let all = [], firstDay = true;
+  let all = [], firstDay = true, diagnostics = { snapshots: 0, sampled: 0, scoreCalls: 0, verdicts: {}, firstGates: {}, allGates: {} };
   for (const d of days) {
     try {
       const hist = await candlesForDay(d.underlying, d.date);
       if (firstDay) { console.log(`  candle check ${d.underlying} ${d.date}: ${hist.c5.length} 5m / ${hist.c15.length} 15m / ${hist.c1h.length} 1H`); firstDay = false;
         if (hist.c15.length < 50) console.warn("  ⚠ Thin candles — is the bridge running on :5000?"); }
       const t = replayDay(d, hist); all = all.concat(t);
-      console.log(`  ${d.underlying} ${d.date}: ${t.length} trade(s)`);
+      const dd = t.diagnostics || {};
+      for (const k of ["snapshots", "sampled", "scoreCalls"]) diagnostics[k] += dd[k] || 0;
+      for (const [k, v] of Object.entries(dd.verdicts || {})) diagnostics.verdicts[k] = (diagnostics.verdicts[k] || 0) + v;
+      for (const [k, v] of Object.entries(dd.firstGates || {})) diagnostics.firstGates[k] = (diagnostics.firstGates[k] || 0) + v;
+      for (const [k, v] of Object.entries(dd.allGates || {})) diagnostics.allGates[k] = (diagnostics.allGates[k] || 0) + v;
+      console.log(`  ${d.underlying} ${d.date}: ${t.length} trade(s) · ${JSON.stringify(dd.verdicts || {})}`);
     } catch (e) { console.warn(`  ${d.file}: ${e.message}`); }
   }
   const wins = all.filter(t => t.outcome === "win").length;
   const net = all.reduce((s, t) => s + (Number(t.pnlRs) || 0), 0);
-  const summary = { generatedAt: new Date().toISOString(), from, to, underlyings: [...new Set(days.map(d => d.underlying))],
-    step: CFG.step, risk: CFG.risk, capital: CFG.capital, trades: all.length, wins, losses: all.length - wins,
-    winRate: all.length ? +(wins / all.length * 100).toFixed(1) : 0, netRs: +net.toFixed(2) };
+  const gross = all.reduce((s, t) => s + (Number(t.grossPnlRs) || 0), 0);
+  const costs = all.reduce((s, t) => s + (Number(t.costRs) || 0), 0);
+  let equity = 0, peak = 0, maxDrawdown = 0;
+  for (const t of all) { equity += Number(t.pnlRs) || 0; peak = Math.max(peak, equity); maxDrawdown = Math.max(maxDrawdown, peak - equity); }
+  const rValues = all.map(t => Number(t.rMultiple)).filter(Number.isFinite);
+  const summary = { generatedAt: new Date().toISOString(), variant: CFG.variant, from, to, underlyings: [...new Set(days.map(d => d.underlying))],
+    step: CFG.step, risk: CFG.risk, capital: CFG.capital, researchWindowBypass: CFG.research, trades: all.length, wins, losses: all.length - wins,
+    winRate: all.length ? +(wins / all.length * 100).toFixed(1) : 0, grossRs: +gross.toFixed(2), costsRs: +costs.toFixed(2),
+    netRs: +net.toFixed(2), maxDrawdownRs: +maxDrawdown.toFixed(2), avgR: rValues.length ? +(rValues.reduce((s, v) => s + v, 0) / rValues.length).toFixed(2) : 0,
+    diagnostics: { ...diagnostics,
+      firstGates: Object.fromEntries(Object.entries(diagnostics.firstGates).sort((a, b) => b[1] - a[1]).slice(0, 10)),
+      allGates: Object.fromEntries(Object.entries(diagnostics.allGates).sort((a, b) => b[1] - a[1]).slice(0, 15)) } };
   fs.mkdirSync(OUT_DIR, { recursive: true });
   const outFile = path.join(OUT_DIR, `replay_${from}_${to}.json`);
   fs.writeFileSync(outFile, JSON.stringify({ summary, trades: all }, null, 2));
   // Also write a stable "latest" pointer the bridge/R&D page reads by default.
   fs.writeFileSync(path.join(OUT_DIR, "replay_latest.json"), JSON.stringify({ summary, trades: all }));
   console.log(`\n${all.length} trades · ${summary.winRate}% WR · net ₹${summary.netRs} → ${outFile}`);
+  if (!all.length) console.log(`No fills. Rejection diagnostics: ${JSON.stringify(summary.diagnostics.allGates)}`);
 }
 
 main().catch(e => { console.error(e); process.exit(1); });

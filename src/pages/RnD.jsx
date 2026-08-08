@@ -4,6 +4,7 @@ import { fetchReplay } from "../data/bridge.js";
 import { styleMetaLearning, regimeAttribution, factorAttribution, tuneWeights, MIN_SAMPLE } from "../engines/rnd.js";
 import { getOptionPaperTrades } from "../state/paperTrades.js";
 import { getScoreWeights, setScoreWeights, DEFAULT_WEIGHTS } from "../engines/score.js";
+import { promotionGate, promotionGatesByStrategy } from "../engines/learning.js";
 
 // ─── R&D — meta-learning over the paper-trade / replay track record ───────────
 
@@ -51,6 +52,8 @@ export default function RnDPage() {
   const regimes = useMemo(() => regimeAttribution(resolved), [resolved]);
   const factors = useMemo(() => factorAttribution(resolved), [resolved]);
   const tuning = useMemo(() => tuneWeights(resolved, weights), [resolved, weights]);
+  const promotion = useMemo(() => promotionGate(trades, { paperOnly: true }), [trades]);
+  const promotionByStrategy = useMemo(() => promotionGatesByStrategy(trades, { paperOnly: true }), [trades]);
 
   const applyWeights = (w) => { setScoreWeights(w); setWeights(w); setApplied(true); setTimeout(() => setApplied(false), 2500); };
   const resetWeights = () => applyWeights(DEFAULT_WEIGHTS);
@@ -104,6 +107,35 @@ export default function RnDPage() {
             ⚠ {resolved.length}/{MIN_SAMPLE} resolved trades — attribution shown for insight, but recommendations are suppressed below {MIN_SAMPLE} to guard against overfitting on thin data.
           </div>
         )}
+
+        <Card title="PROMOTION GATE — PAPER EVIDENCE REQUIRED">
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 12, fontWeight: 800, color: promotion.approved ? C.green : C.amber, fontFamily: "monospace" }}>
+              {promotion.status}
+            </span>
+            <span style={{ fontSize: 9, color: C.dim, fontFamily: "monospace" }}>
+              {promotion.trades} paper trades · {promotion.winRatePct.toFixed(1)}% WR · {promotion.expectancyR.toFixed(2)}R expectancy · PF {Number.isFinite(promotion.profitFactor) ? promotion.profitFactor.toFixed(2) : "∞"}
+            </span>
+          </div>
+          <div style={{ overflowX: "auto", marginTop: 10 }}>
+            <table style={tbl}>
+              <thead><tr style={{ color: C.faint }}>{["Strategy", "Trades", "Win%", "Exp R", "PF", "Status"].map(h => <th key={h} style={th}>{h}</th>)}</tr></thead>
+              <tbody>{promotionByStrategy.map(p => (
+                <tr key={p.key} style={{ borderTop: `0.5px solid #0d1b2a` }}>
+                  <td style={{ ...td, textAlign: "left", color: C.ink }}>{p.label}</td>
+                  <td style={td}>{p.trades}</td>
+                  <td style={td}>{p.trades ? `${p.winRatePct.toFixed(1)}%` : "—"}</td>
+                  <td style={{ ...td, color: p.expectancyR >= 0 ? C.green : C.red }}>{p.trades ? `${p.expectancyR >= 0 ? "+" : ""}${p.expectancyR.toFixed(2)}R` : "—"}</td>
+                  <td style={td}>{p.trades ? (Number.isFinite(p.profitFactor) ? p.profitFactor.toFixed(2) : "∞") : "—"}</td>
+                  <td style={{ ...td, color: p.approved ? C.green : C.amber, fontWeight: 700 }}>{p.status}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+          <div style={{ marginTop: 7, fontSize: 9, color: promotion.approved ? C.green : C.amber, fontFamily: "monospace" }}>
+            {source === "replay" ? "Replay results never authorize promotion; use Live paper trades for this gate." : promotion.approved ? "All promotion checks passed. Keep monitoring before any external execution." : `Hold paper-only: ${promotion.reasons.join(" · ")}.`}
+          </div>
+        </Card>
 
         {/* ── Style meta-learning ── */}
         <Card title="PER-STYLE META-LEARNING — WHICH STYLE PAYS">

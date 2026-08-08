@@ -13,6 +13,8 @@
 //   leg A: target 2× entry (the "sell 50% at double")
 //   leg B: no target, trailing stop arming at 2× (the runner)
 
+import { analyzeNiftyIndexContext, analyzeSelectedOption } from "./niftyMomentum.js";
+
 // Window + side are DATA-DRIVEN (strategy-lab/zh_window_scan.py over 9 expiry
 // days, ~317 tickets): 14:00–14:45 was the only EV-positive zone (+0.15×/ticket,
 // 38.9% doubled, 11% hit 5×) and the spikes sat on the COUNTER-trend side —
@@ -81,9 +83,9 @@ export function zeroHeroRecords({ underlying, pick, lotSize, now = Date.now() })
     entry, optionPremium: entry,
     stopLoss: 0, slPremium: 0,          // lottery: max loss = the premium itself
     lots: 1, lotSize,
-    maxHoldMin: null, squareOff: true,   // 15:15 square-off / expiry settle
+    maxHoldMin: null, squareOff: true,   // 15:12 square-off / expiry settle
     expiry: pick.leg.expiry, strike: pick.leg.strike, direction: pick.direction,
-    regime: "EXPIRY", style: "ZERO_HERO",
+    regime: "EXPIRY", style: "ZERO_HERO", strategyVersion: "zero-hero-v1",
     outcome: "pending", source: "Zero-Hero", tradeType: "Paper",
   };
   return [
@@ -95,5 +97,61 @@ export function zeroHeroRecords({ underlying, pick, lotSize, now = Date.now() })
       setup: `Zero Hero ${pick.leg.strike}${pick.direction} · runner (trails after 2×)`,
       tgtPremium: 0, takeProfit1: 0,
       trailStop: true, trailArmPts: entry, trailPts: entry },  // arm at 2×, trail 1× entry behind the peak
+  ];
+}
+
+// Chart-confirmed Zero-Hero v2. This is separate from the original
+// counter-trend lottery: v2 confirms NIFTY direction, selects an option from
+// chain/OI/liquidity data, and requires the selected premium to break out.
+export const ZH_V2_DEFAULTS = {
+  ...ZH_DEFAULTS, minIndexScore: 4, minDelta: 0.05, maxDelta: 0.35, maxSpreadPct: 0.08,
+  contextFromMin: 14 * 60, contextToMin: 14 * 60 + 45,
+};
+
+export function zeroHeroV2Pick({ chain, oi, candles5m, candles15m, istMin, cfg = ZH_V2_DEFAULTS }) {
+  if (!chain?.ok || !chain.strikes?.length) return { ok: false, reason: "no chain" };
+  if (!chain.isExpiryToday) return { ok: false, reason: "not expiry day" };
+  if (istMin < cfg.enterFromMin || istMin > cfg.enterToMin) return { ok: false, reason: "outside v2 window" };
+  const context = analyzeNiftyIndexContext({ candles5m, candles15m, nowMin: istMin, config: cfg });
+  if (!context.allowed) return { ok: false, reason: context.gates[0] || "NIFTY context not confirmed", context };
+  const side = context.direction === "CE" ? "ce" : "pe";
+  const cands = chain.strikes.map(s => {
+    const leg = s[side] || {};
+    const spreadPct = leg.ltp > 0 && leg.ask ? Math.abs((leg.ask - (leg.bid || leg.ask)) / leg.ltp) : 1;
+    return { strike: s.strike, leg, spreadPct };
+  }).filter(x => x.leg.ltp >= cfg.minPrem && x.leg.ltp <= cfg.maxPrem
+    && (x.leg.oi || 0) >= cfg.minOi && (x.leg.volume || 0) > 0
+    && Math.abs(x.leg.delta || 0) >= cfg.minDelta && Math.abs(x.leg.delta || 0) <= cfg.maxDelta
+    && x.spreadPct <= cfg.maxSpreadPct)
+    .sort((a, b) => Math.abs(a.strike - chain.under_ltp) - Math.abs(b.strike - chain.under_ltp));
+  for (const candidate of cands) {
+    const structure = analyzeSelectedOption({ oi, strike: candidate.strike, direction: context.direction,
+      leg: { ...candidate.leg, spreadPct: candidate.spreadPct }, config: {
+        minDelta: 0, maxDelta: 1, maxSpreadPct: cfg.maxSpreadPct, optionLookback: 5,
+        entryBufferATR: 0.05, stopBufferATR: 0.2, targetR: 2,
+      } });
+    if (structure.allowed) return { ok: true, direction: context.direction, context, structure,
+      leg: { ...candidate.leg, strike: candidate.strike, spreadPct: candidate.spreadPct, expiry: chain.expiry } };
+  }
+  return { ok: false, reason: "no selected option premium breakout", context };
+}
+
+export function zeroHeroV2Records({ underlying, pick, lotSize, now = Date.now() }) {
+  const entry = Number(pick.leg.ask || pick.leg.ltp) || 0;
+  const sl = Number(pick.structure.stopPremium) || Math.max(0.05, entry * 0.7);
+  const tgt = Number(pick.structure.targetPremium) || entry * 2;
+  const base = { timestamp: now, entryTs: now, asset: underlying, assetId: underlying, timeframe: "options",
+    nature: "Scalping", bias: pick.direction === "CE" ? "BULLISH" : "BEARISH", confidence: pick.context.score,
+    entry, optionPremium: entry, stopLoss: sl, slPremium: sl, lots: 1, lotSize, maxHoldMin: 25, squareOff: true,
+    expiry: pick.leg.expiry, strike: pick.leg.strike, direction: pick.direction, regime: pick.context.regime,
+    style: "ZERO_HERO_V2", source: "Zero-Hero-v2", tradeType: "Paper", strategyVersion: "zero-hero-v2",
+    niftyContext: { regime: pick.context.regime, direction: pick.direction, levels: pick.context.levels },
+    optionStructure: { support: pick.structure.support, resistance: pick.structure.resistance,
+      entryTrigger: pick.structure.entryTrigger, confirmed: pick.structure.confirmed }, outcome: "pending" };
+  return [
+    { ...base, id: `ZHV2-${underlying}-${now}-A`, setup: `Zero Hero v2 ${pick.leg.strike}${pick.direction} · target`,
+      tgtPremium: tgt, takeProfit1: tgt, trailStop: false },
+    { ...base, id: `ZHV2-${underlying}-${now}-B`, setup: `Zero Hero v2 ${pick.leg.strike}${pick.direction} · runner`,
+      tgtPremium: 0, takeProfit1: 0, trailStop: true, trailArmPts: Math.max(0.05, entry - sl), trailPts: Math.max(0.05, entry - sl) },
   ];
 }

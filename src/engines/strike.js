@@ -113,7 +113,8 @@ export function selectStrike({ chain, direction, minPremium = 40, expected = nul
     const leg = s[side] || {};
     const adelta = Math.abs(leg.delta || 0);
     const spreadPct = leg.ltp > 0 && leg.ask ? Math.abs((leg.ask - (leg.bid || leg.ask)) / leg.ltp) : 0;
-    return { strike: s.strike, atm: s.atm, ltp: leg.ltp || 0, oi: leg.oi || 0, iv: leg.iv || 0,
+    return { strike: s.strike, atm: s.atm, ltp: leg.ltp || 0, bid: leg.bid || 0, ask: leg.ask || 0,
+             oi: leg.oi || 0, volume: leg.volume || 0, iv: leg.iv || 0,
              delta: leg.delta || 0, theta: leg.theta || 0, adelta, spreadPct };
   });
   const eligible = legs.filter(l => l.ltp >= minPremium && l.adelta >= deltaLo && l.adelta <= deltaHi);
@@ -170,12 +171,12 @@ export function selectStrike({ chain, direction, minPremium = 40, expected = nul
 // the level map's helping barrier — converted to premium via the leg's delta —
 // instead of a blind 30% of premium. Sizing adapts (wider stop → fewer lots),
 // so account risk stays at riskPct either way.
-export function optionsTradePlan({ rec, underlying, mm, riskPct, structStop = null }) {
+export function optionsTradePlan({ rec, underlying, mm, riskPct, structStop = null, optionStructure = null }) {
   if (!rec || !(rec.ltp > 0)) return null;
   const lotUnits = getLotSize(underlying);
   const capital  = Number(mm.capital) || 0;
   const budget   = capital * (riskPct / 100);             // ₹ risk allowed this trade
-  const entry    = Number(rec.ltp) || 0;
+  const entry    = Number(rec.ask || rec.ltp) || 0;
   const adelta   = Math.abs(Number(rec.delta)) || 0.5;
   // SL priority: explicit fixed points (user override) → structural stop →
   // 30% of premium; never more than the premium itself (max loss on a long).
@@ -186,11 +187,14 @@ export function optionsTradePlan({ rec, underlying, mm, riskPct, structStop = nu
     slPts = Math.round(structStop.stopUnder * adelta);
     slBasis = "structure"; slLevel = structStop.level ?? null; slCapped = structStop.capped === "far";
   } else {
-    slPts = Math.round(entry * 0.30);
+    slPts = optionStructure?.stopPremium > 0
+      ? Math.round(entry - optionStructure.stopPremium)
+      : Math.round(entry * 0.30);
   }
   slPts = Math.max(1, Math.min(slPts, Math.floor(entry)));
   const rr = mm.rr === "trail" ? (Number(mm.trailMaxRR) || 3) : (Number(mm.rr) || 2);
-  const tgtPts = +(slPts * rr).toFixed(2);
+  const tgtPts = +(optionStructure?.targetPremium > entry
+    ? optionStructure.targetPremium - entry : slPts * rr).toFixed(2);
   const riskPerLot = slPts * lotUnits;
   const lots = riskPerLot > 0 ? Math.floor(budget / riskPerLot) : 0;
   // Trailing stop (premium): arms at +trailArmR·R, then trails trailR·R behind the

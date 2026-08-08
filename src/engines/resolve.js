@@ -10,7 +10,7 @@
 
 import { netOptionPnl, optionRoundTripCost, exchangeFor } from "./costs.js";
 
-const IST_SQUAREOFF_MIN = 15 * 60 + 15;   // 15:15 IST intraday flat
+const IST_SQUAREOFF_MIN = 15 * 60 + 12;   // 15:12 IST intraday flat
 
 // "HH:MM" → minutes since midnight.
 function hhmmToMin(t) {
@@ -84,7 +84,7 @@ export function resolvePaperTrade(trade, series) {
     if (trade.maxHoldMin && held >= trade.maxHoldMin)
       return exit(outcomeOf(ltp, entry), ltp, pt, `Theta time-stop (${trade.maxHoldMin}m)`, { ...ctx, mfe, mae });
     if (trade.squareOff && ptMin >= IST_SQUAREOFF_MIN)
-      return exit(outcomeOf(ltp, entry), ltp, pt, "15:15 IST square-off", { ...ctx, mfe, mae });
+      return exit(outcomeOf(ltp, entry), ltp, pt, "15:12 IST square-off", { ...ctx, mfe, mae });
   }
   return null;   // no touch yet — still open
 }

@@ -141,8 +141,8 @@ export function evaluateGuardrails(history = [], signal = null, asset = null) {
   if (indian) {
     if (getNseHolidayInfo()?.isHoliday)
       violations.push("NSE holiday today (Dhan calendar) — Indian market closed");
-    else if (mins >= 15 * 60 + 15 && mins <= 15 * 60 + 30)
-      violations.push("NSE square-off — no new entries after 15:15 IST (positions flattened 15:15, close 15:30)");
+    else if (mins >= 15 * 60 + 12 && mins <= 15 * 60 + 30)
+      violations.push("NSE square-off — no new entries after 15:12 IST (positions flattened 15:12, close 15:30)");
   }
   // Warning (not a block): one trade away from the daily cap (skip when cap off)
   if (g.maxTradesPerDay > 0 && todays.length === g.maxTradesPerDay - 1)

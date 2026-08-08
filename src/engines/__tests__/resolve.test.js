@@ -71,9 +71,9 @@ describe("resolvePaperTrade", () => {
     expect(r.exitPremium).toBe(112);
   });
 
-  it("squares off at 15:15 IST", () => {
+  it("squares off at 15:12 IST", () => {
     const longHold = { ...baseTrade, maxHoldMin: 24 * 60 };
-    const series = [pt("15:15", 130)];
+    const series = [pt("15:12", 130)];
     const r = resolvePaperTrade(longHold, series);
     expect(r.exitReason).toMatch(/square-off/);
   });

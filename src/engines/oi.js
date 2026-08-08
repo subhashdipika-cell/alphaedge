@@ -79,7 +79,8 @@ export function analyzeOiTrend(payload, { windows = [5, 15, 30], ictState = null
       const vNow = (oiNow - oiA), vPrev = (oiA - oiB);
       const accel = +((vNow - vPrev) / windows[0]).toFixed(1);
       return { oi: oiNow, oiOpen, dOiOpen, dOiPrev, vel, accel,
-               ltp: last(leg.ltp), iv: last(leg.iv), vol: last(leg.vol), delta: leg.delta };
+               ltp: last(leg.ltp), ltpSeries: leg.ltp || [], iv: last(leg.iv),
+               vol: last(leg.vol), volSeries: leg.vol || [], delta: leg.delta };
     };
     return { strike: s.strike, atm: s.atm, ce: derLeg(s.ce), pe: derLeg(s.pe) };
   });

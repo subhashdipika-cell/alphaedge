@@ -7,6 +7,22 @@
 export const SIGNAL_LEARNING_KEY = "alphaedge_signal_learning";
 export const MIN_BIG_PROFIT_RR = 3;
 export const MAX_SIGNAL_RISK_PCT = 1;
+export const PROMOTION_POLICY = {
+  minResolvedTrades: 50,
+  minWinRatePct: 52,
+  minExpectancyR: 0.10,
+  minProfitFactor: 1.10,
+  maxDrawdownR: 5,
+  minWilsonWinRatePct: 45,
+  wilsonZ: 1.645, // one-sided 95% lower confidence bound
+};
+export const PROMOTION_STRATEGIES = [
+  { key: "nifty-option-workflow-v1", label: "NIFTY option workflow" },
+  { key: "sensex-option-workflow-v1", label: "SENSEX option workflow" },
+  { key: "score-v1", label: "Legacy score strategies" },
+  { key: "zero-hero-v1", label: "Zero-Hero" },
+  { key: "zero-hero-v2", label: "Zero-Hero v2" },
+];
 
 export function outcomeBucket(signalOrOutcome) {
   const outcome = typeof signalOrOutcome === "string" ? signalOrOutcome : signalOrOutcome?.outcome;
@@ -132,4 +148,63 @@ export function getSignalLearning() {
     if (raw) return JSON.parse(raw);
   } catch {}
   return buildSignalLearningProfile([]);
+}
+
+function wilsonLowerBound(wins, n, z = PROMOTION_POLICY.wilsonZ) {
+  if (!n) return 0;
+  const p = wins / n, z2 = z * z, den = 1 + z2 / n;
+  return ((p + z2 / (2 * n) - z * Math.sqrt((p * (1 - p) + z2 / (4 * n)) / n)) / den) * 100;
+}
+
+// Promotion is deliberately stricter than learning/tuning. It is an evidence
+// report only; no broker execution is enabled by this function.
+export function promotionGate(records = [], { strategyKey = null, paperOnly = true, policy = PROMOTION_POLICY } = {}) {
+  const eligible = records.filter(t => isResolvedSignal(t)
+    && (!paperOnly || t.tradeType === "Paper")
+    && (!strategyKey || strategyVersionOf(t) === strategyKey))
+    .sort((a, b) => Number(a.timestamp || a.entryTs || 0) - Number(b.timestamp || b.entryTs || 0));
+  const wins = eligible.filter(isWinSignal).length;
+  const losses = eligible.length - wins;
+  const rValues = eligible.map(signalPnlR);
+  const grossProfitR = rValues.filter(r => r > 0).reduce((s, r) => s + r, 0);
+  const grossLossR = -rValues.filter(r => r < 0).reduce((s, r) => s + r, 0);
+  let equity = 0, peak = 0, maxDrawdownR = 0;
+  for (const r of rValues) { equity += r; peak = Math.max(peak, equity); maxDrawdownR = Math.max(maxDrawdownR, peak - equity); }
+  const winRatePct = eligible.length ? wins / eligible.length * 100 : 0;
+  const expectancyR = eligible.length ? rValues.reduce((s, r) => s + r, 0) / eligible.length : 0;
+  const profitFactor = grossLossR > 0 ? grossProfitR / grossLossR : grossProfitR > 0 ? Infinity : 0;
+  const wilsonWinRatePct = wilsonLowerBound(wins, eligible.length, policy.wilsonZ);
+  const checks = {
+    sample: eligible.length >= policy.minResolvedTrades,
+    winRate: winRatePct >= policy.minWinRatePct,
+    expectancy: expectancyR >= policy.minExpectancyR,
+    profitFactor: profitFactor >= policy.minProfitFactor,
+    drawdown: maxDrawdownR <= policy.maxDrawdownR,
+    confidence: wilsonWinRatePct >= policy.minWilsonWinRatePct,
+  };
+  const reasons = [];
+  if (!checks.sample) reasons.push(`${eligible.length}/${policy.minResolvedTrades} resolved paper trades`);
+  if (!checks.winRate) reasons.push(`win rate ${winRatePct.toFixed(1)}% < ${policy.minWinRatePct}%`);
+  if (!checks.expectancy) reasons.push(`expectancy ${expectancyR.toFixed(2)}R < ${policy.minExpectancyR.toFixed(2)}R`);
+  if (!checks.profitFactor) reasons.push(`profit factor ${Number.isFinite(profitFactor) ? profitFactor.toFixed(2) : "∞"} < ${policy.minProfitFactor.toFixed(2)}`);
+  if (!checks.drawdown) reasons.push(`drawdown ${maxDrawdownR.toFixed(2)}R > ${policy.maxDrawdownR.toFixed(2)}R`);
+  if (!checks.confidence) reasons.push(`confidence lower bound ${wilsonWinRatePct.toFixed(1)}% < ${policy.minWilsonWinRatePct}%`);
+  return { approved: Object.values(checks).every(Boolean), status: Object.values(checks).every(Boolean) ? "PROMOTION_ELIGIBLE" : "PAPER_ONLY",
+    strategyKey, paperOnly, trades: eligible.length, wins, losses, winRatePct, expectancyR, profitFactor, maxDrawdownR, wilsonWinRatePct, checks, reasons,
+    policy };
+}
+
+function strategyVersionOf(record) {
+  const explicit = record?.strategyVersion;
+  if (explicit === "nifty-option-scalp-v1") return "nifty-option-workflow-v1";
+  if (explicit) return explicit;
+  if (record?.source === "Zero-Hero") return "zero-hero-v1";
+  if (record?.source === "Zero-Hero-v2") return "zero-hero-v2";
+  if (record?.assetId === "NIFTY50") return "nifty-option-workflow-v1";
+  if (record?.assetId === "SENSEX") return "sensex-option-workflow-v1";
+  return "score-v1";
+}
+
+export function promotionGatesByStrategy(records = [], { paperOnly = true, policy = PROMOTION_POLICY, strategies = PROMOTION_STRATEGIES } = {}) {
+  return strategies.map(strategy => ({ ...strategy, ...promotionGate(records, { strategyKey: strategy.key, paperOnly, policy }) }));
 }

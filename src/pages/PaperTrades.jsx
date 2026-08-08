@@ -311,7 +311,7 @@ export default function PaperTradesPage() {
             </div>
           )}
           <div style={{ marginTop: 8, fontSize: 8, color: C.faint }}>
-            Resolves automatically against the /dhan/premium series: SL-first on ambiguity, {`theta time-stop`}, 15:15 IST square-off. Runs even if the app was closed.
+            Resolves automatically against the /dhan/premium series: SL-first on ambiguity, {`theta time-stop`}, 15:12 IST square-off. Runs even if the app was closed.
           </div>
         </Card>
 

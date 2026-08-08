@@ -61,7 +61,7 @@ const { resolvePaperTrade, entryTsToUtc } = await import("../src/engines/resolve
 const { getMoneyMgt, getRiskPolicy } = await import("../src/state/settings.js");
 const { eventProximity } = await import("../src/data/events.js");
 const { sendPaperOpenAlert, sendPaperCloseAlert, tgConfigured } = await import("../src/data/telegram.js");
-const { zeroHeroPick, zeroHeroRecords } = await import("../src/engines/zerohero.js");
+const { zeroHeroPick, zeroHeroRecords, zeroHeroV2Pick, zeroHeroV2Records } = await import("../src/engines/zerohero.js");
 const { fetchOptionChain, getLotSize } = await import("../src/data/bridge.js");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -80,6 +80,7 @@ const CFG = {
   range: Number(opt("range", 8)),
   once: flag("once"),
   zeroHero: !flag("no-zerohero"),   // expiry-day lottery scalp (paper experiment)
+  zeroHeroV2: flag("zerohero-v2"),  // chart-confirmed, opt-in paper experiment
   underlyings: (opt("underlying", "") ? [opt("underlying", "")] : ASSETS.map(a => a.id)),
 };
 const ENTER_FROM = 9 * 60 + 20;   // no new entries before 09:20 IST (skip the open auction chop)
@@ -191,6 +192,8 @@ async function scanOne(store, underlying) {
     underlying,
     candles5m: inputs.candles5m, candles15m: inputs.candles15m, candles1H: inputs.candles1H,
     chain: inputs.chain, oi, vix: inputs.vix,
+    dhanOptionScalp: underlying === "NIFTY50",
+    sensexOptionWorkflow: underlying === "SENSEX",
     history: store.trades, events: eventProximity(underlying),
     mm: { ...getMoneyMgt(), capital: CFG.capital }, riskPct: CFG.risk,
   });
@@ -209,6 +212,7 @@ async function scanOne(store, underlying) {
 
   const now = Date.now();
   const label = ASSETS.find(a => a.id === underlying)?.label || underlying;
+  const entryPremium = Number(r.plan.entry || r.strike.ask || r.strike.ltp) || 0;
   const record = {
     id: `AUTO-${underlying}-${now}`,
     timestamp: now, entryTs: now,
@@ -218,13 +222,14 @@ async function scanOne(store, underlying) {
     confidence: r.score,
     setup: `${r.style?.label || "Score"} · ${r.strike.strike}${r.direction} · ${r.regime.label}`,
     // premium-based fields (isOptionPaperTrade + resolver key on these)
-    entry: r.strike.ltp, optionPremium: r.strike.ltp,
+    entry: entryPremium, optionPremium: entryPremium,
     slPremium: r.plan.slPrice, tgtPremium: r.plan.tgtPrice,
     stopLoss: r.plan.slPrice, takeProfit1: r.plan.tgtPrice,
     lots: r.plan.lots, lotSize: r.plan.lotUnits,
     maxHoldMin: r.plan.maxHoldMin, squareOff: r.plan.squareOff !== false,
     trailStop: r.plan.trailStop === true, trailArmPts: r.plan.trailArmPts, trailPts: r.plan.trailPts,
     riskReward: r.plan.rr, expiry: r.strike.expiry, strike: r.strike.strike, direction: r.direction,
+    entryQuote: "ask", strategyVersion: underlying === "NIFTY50" ? "nifty-option-workflow-v1" : underlying === "SENSEX" ? "sensex-option-workflow-v1" : "score-v1",
     summary: r.report.map(l => `${l.k}: ${l.v}`).join(" · "),
     scoreFactors: Object.fromEntries(Object.entries(r.factors).map(([k, f]) => [k, f.score01])),
     structure: r.structure ? {
@@ -235,11 +240,15 @@ async function scanOne(store, underlying) {
       slBasis: r.structure.slBasis ?? "pct", slLevel: r.structure.slLevel ?? null,
     } : null,
     regime: r.regime.regime, style: r.style?.style,
+    niftyContext: r.niftyContext ? { regime: r.niftyContext.regime, score: r.niftyContext.score,
+      levels: r.niftyContext.levels, direction: r.niftyContext.direction } : null,
+    optionStructure: r.optionStructure ? { support: r.optionStructure.support, resistance: r.optionStructure.resistance,
+      entryTrigger: r.optionStructure.entryTrigger, confirmed: r.optionStructure.confirmed } : null,
     priorDay: r.regime.priorDay ? { dayType: r.regime.priorDay.dayType, gapPct: r.regime.priorDay.gapPct, closePos: r.regime.priorDay.closePos } : null,
     outcome: "pending", source: "Auto-Scan", tradeType: "Paper",
   };
   store.trades.push(record);
-  log(`OPENED ${underlying} ${r.strike.strike}${r.direction} @ ₹${r.strike.ltp} · ${r.style?.style} · score ${r.score} · ${r.plan.lots}×${r.plan.lotUnits} lots · SL ₹${r.plan.slPrice} TGT ₹${r.plan.tgtPrice}`);
+  log(`OPENED ${underlying} ${r.strike.strike}${r.direction} @ ₹${entryPremium} ASK · ${r.style?.style} · score ${r.score} · ${r.plan.lots}×${r.plan.lotUnits} lots · SL ₹${r.plan.slPrice} TGT ₹${r.plan.tgtPrice}`);
   sendPaperOpenAlert(record);   // Telegram on the actual open (fire-and-forget)
   return { underlying, note: `TRADE(${r.score})→${r.strike.strike}${r.direction}` };
 }
@@ -275,6 +284,27 @@ async function maybeZeroHero(store, mins) {
   }
 }
 
+async function maybeZeroHeroV2(store, mins) {
+  if (!CFG.zeroHeroV2) return;
+  const u = "NIFTY50";
+  const today = istDateStr();
+  if (store.trades.some(t => t.assetId === u && t.expiry === today && t.source === "Zero-Hero-v2")) return;
+  try {
+    const chain = await fetchOptionChain(u, CFG.range, null);
+    const inputs = _lastInputs.get(u) || await fetchScoreInputs(u, CFG.range, null);
+    const oi = inputs.oiTrend ? analyzeOiTrend(inputs.oiTrend) : { ok: false };
+    const pick = zeroHeroV2Pick({ chain, oi, candles5m: inputs.candles5m, candles15m: inputs.candles15m, istMin: mins });
+    if (!pick.ok) {
+      if (!/window|expiry day/.test(pick.reason)) log(`ZERO-HERO-V2 ${u}: skip — ${pick.reason}`);
+      return;
+    }
+    const recs = zeroHeroV2Records({ underlying: u, pick, lotSize: getLotSize(u) });
+    store.trades.push(...recs);
+    log(`ZERO-HERO-V2 OPENED ${u} ${pick.leg.strike}${pick.direction} @ ₹${recs[0].entry} ASK · NIFTY ${pick.context.regime} · premium breakout`);
+    sendPaperOpenAlert({ ...recs[0], lots: 2, id: recs[0].id.replace(/-A$/, "") });
+  } catch (e) { log(`ZERO-HERO-V2 ${u}: error — ${e.message}`); }
+}
+
 // ── one cycle: resolve, then (if in-session) scan for entries ──
 async function tick() {
   const store = loadStore();
@@ -297,6 +327,7 @@ async function tick() {
     catch (e) { notes.push(`err:${e.message?.slice(0, 20)}`); }
   }
   await maybeZeroHero(store, mins);
+  await maybeZeroHeroV2(store, mins);
   saveStore(store);
   const s = store.summary;
   log(`scan ${CFG.underlyings.map((u, i) => `${u}:${notes[i]}`).join(" · ")} | open ${s.open} · resolved ${s.resolved} (${s.winRate}% WR, ${inr(s.netRs)})`);
@@ -311,7 +342,7 @@ async function main() {
   console.log(` indices  ${CFG.underlyings.join(", ")}`);
   console.log(` cycle    ${CFG.intervalMs / 1000}s · capital ₹${CFG.capital.toLocaleString("en-IN")} · risk ${CFG.risk}%/trade`);
   console.log(` store    ${STORE}`);
-  console.log(` PAPER ONLY — no broker orders. Entries ${hhmm(ENTER_FROM)}–${hhmm(ENTER_TO)} IST; 15:15 square-off.`);
+  console.log(` PAPER ONLY — no broker orders. Entries ${hhmm(ENTER_FROM)}–${hhmm(ENTER_TO)} IST; 15:12 square-off.`);
   console.log(` telegram ${tgConfigured() ? "ON — alerts on paper open/close" : "off (set TG_BOT_TOKEN/TG_CHAT_ID or strategy-lab/telegram_config.json)"}`);
   console.log(` zero-hero ${CFG.zeroHero ? "ON — expiry days 14:00–14:45, ₹3–5 FADE-side lottery ×2 lots (--no-zerohero to disable)" : "off"}`);
   console.log("─".repeat(72));

@@ -198,11 +198,34 @@ describe("scoreOption — data-driven entry windows", () => {
 
 describe("scoreOption — coverage renormalization", () => {
   it("still scores with VIX missing (renormalizes) but not below coverage floor", () => {
-    const r = scoreOption({ underlying: "NIFTY50", candles5m: trendUp(), candles15m: trendUp(), candles1H: trendUp(), chain: bullChain(), oi: bullOi(), vix: null, history: [] });
+    const r = scoreOption({ underlying: "NIFTY50", candles5m: trendUp(), candles15m: trendUp(), candles1H: trendUp(), chain: bullChain(), oi: bullOi(), vix: null, history: [], nowMin: AT_1030 });
     // vix missing removes part of one factor's data but ivPercentile keeps factor 6 present;
     // coverage stays >= 70 so it still produces a score.
     expect(r.coverage).toBeGreaterThanOrEqual(70);
     expect(r.score).toBeGreaterThan(0);
+  });
+});
+
+describe("scoreOption — NIFTY chart-first workflow", () => {
+  it("keeps the selected strategy style while using NIFTY context", () => {
+    const r = scoreOption({ underlying: "NIFTY50", candles5m: trendUp(), candles15m: trendUp(), candles1H: trendUp(),
+      chain: bullChain(), oi: bullOi(), vix, history: [], style: "INTRADAY", nowMin: AT_1030,
+      niftyOptionWorkflow: true });
+    expect(r.style.style).toBe("INTRADAY");
+    expect(r.niftyContext).toBeTruthy();
+    expect(r.niftyContext.direction).toBe("CE");
+    expect(["CE", "NO_TRADE"]).toContain(r.direction);
+  });
+});
+
+describe("scoreOption — SENSEX chart-first filter", () => {
+  it("uses SENSEX context without changing the selected style", () => {
+    const r = scoreOption({ underlying: "SENSEX", candles5m: trendUp(), candles15m: trendUp(), candles1H: trendUp(),
+      chain: { ...bullChain(), underlying: "SENSEX" }, oi: bullOi(), vix, history: [], style: "INTRADAY", nowMin: AT_1030,
+      sensexOptionWorkflow: true });
+    expect(r.style.style).toBe("INTRADAY");
+    expect(r.indexContext).toBeTruthy();
+    expect(r.niftyContext).toBeNull();
   });
 });
 

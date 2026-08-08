@@ -48,7 +48,7 @@ REM     This is what takes paper trades on its own - it scores all four indices
 REM     every ~5 min in-session and logs every TRADE-grade setup. Runs without
 REM     the browser; writes strategy-lab\paper\auto_paper_trades.json. ---
 echo  [3/4] Launching the autonomous paper-trade scanner...
-start "AlphaEdge Scanner" cmd /k "pushd ""%~dp0"" && node scripts\scanner.mjs"
+start "AlphaEdge Scanner" cmd /k "pushd ""%~dp0"" && node scripts\scanner.mjs --zerohero-v2"
 
 REM --- Window 4: the app UI (port 5001, opens your browser automatically) ---
 echo  [4/4] Launching the AlphaEdge app...
@@ -63,7 +63,7 @@ echo     3^) Scanner       - AUTONOMOUS paper trader (no broker orders)
 echo     4^) App           - the UI on http://localhost:5001 (browser opens)
 echo.
 echo   The Scanner takes paper trades on its own during market hours
-echo   (09:20-15:00 IST entries, 15:15 square-off). It keeps running even
+echo   (09:20-15:00 IST entries, 15:12 square-off). It keeps running even
 echo   if you close the browser - watch its window, or the app's
 echo   Paper Trades page -^> "Autonomous Scanner" section.
 echo.

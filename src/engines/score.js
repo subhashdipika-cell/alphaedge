@@ -13,6 +13,7 @@ import { expectedMove, selectStrike, optionsTradePlan } from "./strike.js";
 import { evaluateGuardrails, marketSession } from "./guardrails.js";
 import { selectStyle, styleWeights, STYLE_STRIKE, STYLE_HOLD, getStrikePref } from "./style.js";
 import { buildLevelMap, extensionATR, humanCheck, capTargetToStructure, structuralStopUnder, getLevelsConfig } from "./levels.js";
+import { analyzeNiftyIndexContext, analyzeSensexIndexContext, analyzeSelectedOption } from "./niftyMomentum.js";
 
 // Chain & OI is deliberately the LARGEST factor (2026-07-19 rebalance): in
 // Indian index options, writer positioning (OI, ΔOI, spurts, walls) is the
@@ -29,7 +30,7 @@ export const WATCH_THRESHOLD = 55;
 // days, ~850 simulated entries per style) ────────────────────────────────────
 //   INTRADAY/SWING: mornings pay (09:30 +0.11R, 10:00 +0.21R) and every window
 //   from 13:00 on is negative (−0.02 → −0.15R): the 2R premium target becomes
-//   unreachable before the 15:15 square-off, so late entries just bleed theta
+//   unreachable before the 15:12 square-off, so late entries just bleed theta
 //   into a flat exit (80–95% square-off rate). Cut new entries at 13:00.
 //   SCALP: with a 5–10 min hold the premium almost never travels far enough to
 //   hit SL or target — ~100% time-stops, avg ≈ 0.00R GROSS, i.e. negative after
@@ -304,6 +305,14 @@ export function scoreOption(inputs) {
   const eventMin = events.eventMin ?? null;      // minutes to next high-impact event
   const eventToday = !!events.eventToday;
   const eventSoon = eventMin != null && eventMin >= 0 && eventMin < 30;
+  // NIFTY's chart-first/option-second workflow applies to every NIFTY
+  // strategy style. `dhanOptionScalp` remains as a compatibility alias for
+  // the dedicated live scalp scanner, while `niftyOptionWorkflow` allows the
+  // normal Scalp/Intraday/Swing selectors to keep their own style semantics.
+  const niftyOptionWorkflow = (inputs.niftyOptionWorkflow === true || inputs.dhanOptionScalp === true) && underlying === "NIFTY50";
+  const sensexOptionWorkflow = inputs.sensexOptionWorkflow === true && underlying === "SENSEX";
+  const indexOptionWorkflow = niftyOptionWorkflow || sensexOptionWorkflow;
+  const forceNiftyScalp = inputs.dhanOptionScalp === true && inputs.niftyOptionWorkflow !== true;
   const dteYears = chain?.expiry ? Math.max(2 / 24, (new Date(`${chain.expiry}T15:30:00+05:30`).getTime() - Date.now()) / 86400000) / 365 : (1 / 365);
   const eventInDTE = eventToday || (eventMin != null && eventMin >= 0 && eventMin / (60 * 24) < dteYears * 365);
 
@@ -312,7 +321,9 @@ export function scoreOption(inputs) {
 
   // Trade-style selection (Strategy Selector) → per-style weight profile + strike
   // preference + hold. Caller may force a style via inputs.style.
-  const styleSel = inputs.style
+  const styleSel = forceNiftyScalp
+    ? { style: "SCALP", label: "Dhan NIFTY Option Scalp", reasons: ["NIFTY index context to option-premium confirmation"], alternatives: [] }
+    : inputs.style
     ? { style: inputs.style, label: STYLE_STRIKE[inputs.style] ? inputs.style : inputs.style, reasons: ["Manual style override"], alternatives: [] }
     : selectStyle({ regime, vix, dteYears, ivp: chain?.ivPercentile ?? null });
   const style = styleSel.style;
@@ -339,9 +350,16 @@ export function scoreOption(inputs) {
   // Style entry window (empirical — see STYLE_ENTRY_WINDOW). Only enforced while
   // the market is open: off-hours scoring is research/preview, not an entry.
   const nowMin = Number.isFinite(inputs.nowMin) ? inputs.nowMin : istMinutesNow();
+  const indexContext = indexOptionWorkflow
+    ? (sensexOptionWorkflow
+      ? analyzeSensexIndexContext({ candles5m, candles15m, nowMin: inputs.nowMin, config: inputs.sensexOptionConfig })
+      : analyzeNiftyIndexContext({ candles5m, candles15m, nowMin: inputs.nowMin, config: inputs.niftyOptionScalpConfig }))
+    : null;
+  const niftyContext = niftyOptionWorkflow ? indexContext : null;
+  if (indexContext?.gates?.length) indexContext.gates.forEach(g => gates.push(`${sensexOptionWorkflow ? "SENSEX" : "NIFTY"} context: ${g}`));
   const marketOpenNow = nowMin >= 9 * 60 + 15 && nowMin <= 15 * 60 + 30;
   const win = STYLE_ENTRY_WINDOW[style];
-  if (marketOpenNow && win && (nowMin < win.from || nowMin > win.to)) {
+  if (!inputs.ignoreEntryWindow && marketOpenNow && win && (nowMin < win.from || nowMin > win.to)) {
     const hhmm = (m) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
     gates.push(style === "SCALP"
       ? `Outside the scalp window ${hhmm(win.from)}–${hhmm(win.to)} — scalps only clear costs there (backtest)`
@@ -381,7 +399,10 @@ export function scoreOption(inputs) {
   const preCE = scoreDir("CE", null), prePE = scoreDir("PE", null);
   const dirTotal = (f) => Object.entries(f).filter(([k]) => k !== "greeks")
     .reduce((s, [, v]) => s + (v.missing ? 0 : v.points), 0);
-  const direction = dirTotal(preCE) >= dirTotal(prePE) ? "CE" : "PE";
+  const direction = indexOptionWorkflow
+    ? (indexContext?.direction || "NO_TRADE")
+    : (dirTotal(preCE) >= dirTotal(prePE) ? "CE" : "PE");
+  if (direction === "NO_TRADE") gates.push("NIFTY index context has no confirmed direction");
 
   // OI veto — never buy against a STRONG writer consensus. Price action can
   // outvote a mild OI lean, but when the smart-money composite is firmly on
@@ -414,6 +435,11 @@ export function scoreOption(inputs) {
                               budget: riskBudget, underlying, mm, stopUnder: structStop?.stopUnder ?? null });
   const chosenLeg = pick?.leg || null;
   const factors = scoreDir(direction, chosenLeg);
+  const optionStructure = indexOptionWorkflow && chosenLeg
+    ? analyzeSelectedOption({ oi, strike: chosenLeg.strike, direction, leg: chosenLeg,
+      config: sensexOptionWorkflow ? inputs.sensexOptionConfig : inputs.niftyOptionScalpConfig })
+    : null;
+  if (optionStructure?.gates?.length) optionStructure.gates.forEach(g => gates.push(`Option premium: ${g}`));
 
   // Underlying stop distance for the R:R-to-structure gate: the structural stop
   // when available, else the prospective %-premium SL back-converted via delta.
@@ -447,8 +473,8 @@ export function scoreOption(inputs) {
 
   // ── plan + expected move (hold + size from the style; 0-DTE scalp is half-size) ──
   const plan = (verdict !== "NO_TRADE" && chosenLeg)
-    ? { ...optionsTradePlan({ rec: { ltp: chosenLeg.ltp, delta: chosenLeg.delta }, underlying, mm,
-                              riskPct: riskPct * sizeFactor, structStop }),
+    ? { ...optionsTradePlan({ rec: { ltp: chosenLeg.ltp, ask: inputs.legacyReplay ? null : chosenLeg.ask, delta: chosenLeg.delta }, underlying, mm,
+                              riskPct: riskPct * sizeFactor, structStop, optionStructure }),
         maxHoldMin: hold.maxHoldMin, squareOff: hold.squareOff, sizeFactor } : null;
 
   // Barrier-aware target: the target lives just BEFORE the next barrier, never
@@ -510,8 +536,9 @@ export function scoreOption(inputs) {
   return {
     ok: true, underlying, direction: verdict === "NO_TRADE" ? "NO_TRADE" : direction,
     verdict, score, coverage, why, gates, structure,
-    regime, style: styleInfo, factors, weights,
-    strike: chosenLeg ? { strike: chosenLeg.strike, moneyness: pick?.moneyness, ltp: chosenLeg.ltp,
+    regime, niftyContext, indexContext, optionStructure, style: styleInfo, factors, weights,
+     strike: chosenLeg ? { strike: chosenLeg.strike, moneyness: pick?.moneyness, ltp: chosenLeg.ltp,
+                           bid: chosenLeg.bid, ask: chosenLeg.ask, volume: chosenLeg.volume,
                           delta: chosenLeg.delta, theta: chosenLeg.theta, iv: chosenLeg.iv,
                           spreadPct: chosenLeg.spreadPct != null ? +(chosenLeg.spreadPct * 100).toFixed(2) : null,
                           expiry: chain?.expiry, reasons: pick?.reasons || [] } : null,

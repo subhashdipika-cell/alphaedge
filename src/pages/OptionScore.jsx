@@ -73,6 +73,8 @@ export default function OptionScorePage({ onPaperTrade }) {
       underlying,
       candles5m: raw.candles5m, candles15m: raw.candles15m, candles1H: raw.candles1H,
       chain: raw.chain, oi, vix: raw.vix, style: styleOverride,
+      niftyOptionWorkflow: underlying === "NIFTY50",
+      sensexOptionWorkflow: underlying === "SENSEX",
       history, events: eventProximity(underlying), mm: getMoneyMgt(), riskPct: getRiskPolicy().maxRiskPct,
     });
   }, [raw, history, underlying, styleOverride]);
