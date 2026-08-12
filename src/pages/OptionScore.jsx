@@ -75,6 +75,7 @@ export default function OptionScorePage({ onPaperTrade }) {
       chain: raw.chain, oi, vix: raw.vix, style: styleOverride,
       niftyOptionWorkflow: underlying === "NIFTY50",
       sensexOptionWorkflow: underlying === "SENSEX",
+      optionWorkflow: true,
       history, events: eventProximity(underlying), mm: getMoneyMgt(), riskPct: getRiskPolicy().maxRiskPct,
     });
   }, [raw, history, underlying, styleOverride]);

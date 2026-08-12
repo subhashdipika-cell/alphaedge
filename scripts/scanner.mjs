@@ -197,6 +197,7 @@ async function scanOne(store, underlying) {
     chain: inputs.chain, oi, vix: inputs.vix,
     dhanOptionScalp: underlying === "NIFTY50",
     sensexOptionWorkflow: underlying === "SENSEX",
+    optionWorkflow: true,
     history: store.trades, events: eventProximity(underlying),
     mm: { ...getMoneyMgt(), capital: CFG.capital }, riskPct: CFG.risk,
   });

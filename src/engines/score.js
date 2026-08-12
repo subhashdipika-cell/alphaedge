@@ -13,7 +13,7 @@ import { expectedMove, selectStrike, optionsTradePlan } from "./strike.js";
 import { evaluateGuardrails, marketSession } from "./guardrails.js";
 import { selectStyle, styleWeights, STYLE_STRIKE, STYLE_HOLD, getStrikePref } from "./style.js";
 import { buildLevelMap, extensionATR, humanCheck, capTargetToStructure, structuralStopUnder, getLevelsConfig } from "./levels.js";
-import { analyzeNiftyIndexContext, analyzeSensexIndexContext, analyzeSelectedOption } from "./niftyMomentum.js";
+import { analyzeIndexContext, analyzeNiftyIndexContext, analyzeSensexIndexContext, analyzeSelectedOption } from "./niftyMomentum.js";
 
 // Chain & OI is deliberately the LARGEST factor (2026-07-19 rebalance): in
 // Indian index options, writer positioning (OI, ΔOI, spurts, walls) is the
@@ -309,9 +309,14 @@ export function scoreOption(inputs) {
   // strategy style. `dhanOptionScalp` remains as a compatibility alias for
   // the dedicated live scalp scanner, while `niftyOptionWorkflow` allows the
   // normal Scalp/Intraday/Swing selectors to keep their own style semantics.
+  const indianOption = /^(NIFTY50|BANKNIFTY|FINNIFTY|SENSEX)$/.test(String(underlying || "").toUpperCase());
   const niftyOptionWorkflow = (inputs.niftyOptionWorkflow === true || inputs.dhanOptionScalp === true) && underlying === "NIFTY50";
   const sensexOptionWorkflow = inputs.sensexOptionWorkflow === true && underlying === "SENSEX";
-  const indexOptionWorkflow = niftyOptionWorkflow || sensexOptionWorkflow;
+  // The same index-first -> selected-option-confirmation workflow must apply
+  // to every Indian index option strategy. The old implementation only applied
+  // the premium chart gate to NIFTY/SENSEX, allowing BANKNIFTY/FINNIFTY trades
+  // to enter from a score without confirmation on the chosen option.
+  const indexOptionWorkflow = indianOption && (inputs.optionWorkflow === true || niftyOptionWorkflow || sensexOptionWorkflow);
   const forceNiftyScalp = inputs.dhanOptionScalp === true && inputs.niftyOptionWorkflow !== true;
   const dteYears = chain?.expiry ? Math.max(2 / 24, (new Date(`${chain.expiry}T15:30:00+05:30`).getTime() - Date.now()) / 86400000) / 365 : (1 / 365);
   const eventInDTE = eventToday || (eventMin != null && eventMin >= 0 && eventMin / (60 * 24) < dteYears * 365);
@@ -353,7 +358,8 @@ export function scoreOption(inputs) {
   const indexContext = indexOptionWorkflow
     ? (sensexOptionWorkflow
       ? analyzeSensexIndexContext({ candles5m, candles15m, nowMin: inputs.nowMin, config: inputs.sensexOptionConfig })
-      : analyzeNiftyIndexContext({ candles5m, candles15m, nowMin: inputs.nowMin, config: inputs.niftyOptionScalpConfig }))
+      : analyzeIndexContext({ underlying, candles5m, candles15m, nowMin: inputs.nowMin,
+          config: inputs.niftyOptionScalpConfig }))
     : null;
   const niftyContext = niftyOptionWorkflow ? indexContext : null;
   if (indexContext?.gates?.length) indexContext.gates.forEach(g => gates.push(`${sensexOptionWorkflow ? "SENSEX" : "NIFTY"} context: ${g}`));

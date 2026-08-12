@@ -9,7 +9,7 @@ import { getNseHolidayInfo } from "../data/bridge.js";
 
 export const GUARDRAIL_DEFAULTS = {
   enabled:          true,
-  policyVersion:    2,     // bump when defaults change so stale saved configs migrate (see getGuardrails)
+  policyVersion:    3,     // bump when defaults change so stale saved configs migrate (see getGuardrails)
   // ── Emotion-derived guardrails: OFF since 2026-07-15 ──────────────────────
   // Cooldown, daily cap, consecutive-loss stop and the open lockout were all
   // anti-revenge / anti-overtrading / anti-tilt / anti-FOMO rules from the
@@ -17,10 +17,10 @@ export const GUARDRAIL_DEFAULTS = {
   // emotion to guard against, so they're disabled to see how the strategy
   // performs unconstrained. 0 / false = off; set any of these in Settings (or
   // here) to restore the discipline.
-  cooldownMin:      0,     // (was 15)  post-loss revenge-trade cooldown, minutes; 0 = off
-  maxTradesPerDay:  0,     // (was 5)   hard daily trade cap; 0 = unlimited
-  maxConsecLosses:  0,     // (was 2)   consecutive-loss session stop; 0 = off
-  openLockout:      false, // (was true) no entries during the volatile NSE open
+  cooldownMin:      20,    // mechanical pause after a resolved loss
+  maxTradesPerDay:  3,     // cap aggregate Indian option exposure per day
+  maxConsecLosses:  2,     // stop the session after two consecutive losses
+  openLockout:      true,  // avoid the highest-slippage NSE opening window
   openLockoutEnd:   "10:15", // IST — first entries allowed after this (only if openLockout re-enabled)
   // ── Structural risk rules (NOT emotion-derived): kept ON ──────────────────
   blockExpiryDay:   true,  // no 0-DTE long options (scalp-only handled elsewhere)

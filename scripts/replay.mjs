@@ -263,6 +263,7 @@ function replayDay({ file, underlying, date }, candleHist) {
       chain, oi, vix: null, history: [], events: {}, mm: { capital: CFG.capital, rr: 2 }, riskPct: CFG.risk,
       dhanOptionScalp: CFG.variant !== "legacy" && underlying === "NIFTY50",
       sensexOptionWorkflow: CFG.variant !== "legacy" && underlying === "SENSEX",
+      optionWorkflow: CFG.variant !== "legacy",
       ignoreEntryWindow: CFG.research,
       legacyReplay: CFG.variant === "legacy",
       niftyOptionScalpConfig: { minIndexScore: CFG.indexScore, minDelta: CFG.minDelta, maxDelta: CFG.maxDelta, targetR: CFG.targetR },

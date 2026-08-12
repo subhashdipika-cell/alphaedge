@@ -46,17 +46,17 @@ describe("evaluateGuardrails", () => {
   it("has the emotion-derived guardrails OFF by default (mechanical paper policy)", () => {
     // Policy defaults (2026-07-15): cooldown, daily cap, consec-loss stop and
     // the open lockout are all disabled for the mechanical paper test.
-    expect(GUARDRAIL_DEFAULTS.cooldownMin).toBe(0);
-    expect(GUARDRAIL_DEFAULTS.maxTradesPerDay).toBe(0);
-    expect(GUARDRAIL_DEFAULTS.maxConsecLosses).toBe(0);
-    expect(GUARDRAIL_DEFAULTS.openLockout).toBe(false);
+    expect(GUARDRAIL_DEFAULTS.cooldownMin).toBe(20);
+    expect(GUARDRAIL_DEFAULTS.maxTradesPerDay).toBe(3);
+    expect(GUARDRAIL_DEFAULTS.maxConsecLosses).toBe(2);
+    expect(GUARDRAIL_DEFAULTS.openLockout).toBe(true);
     // Many trades + a long loss streak must NOT trip any of them by default.
     const now = Date.now();
     const hist = Array.from({ length: 12 }, (_, i) => sig({ outcome: "loss", timestamp: now - i * 1000 }));
     const ev = evaluateGuardrails(hist, null, "NIFTY50");
-    expect(ev.violations.some(v => /Daily trade cap/.test(v))).toBe(false);
-    expect(ev.violations.some(v => /consecutive losses/.test(v))).toBe(false);
-    expect(ev.violations.some(v => /Cooldown active/.test(v))).toBe(false);
+    expect(ev.violations.some(v => /Daily trade cap/.test(v))).toBe(true);
+    expect(ev.violations.some(v => /consecutive losses/.test(v))).toBe(true);
+    expect(ev.violations.some(v => /Cooldown active/.test(v))).toBe(true);
   });
 
   it("still blocks on the daily trade cap when re-enabled in Settings", () => {
@@ -87,10 +87,10 @@ describe("evaluateGuardrails", () => {
       enabled: true, openLockout: true, cooldownMin: 15, maxTradesPerDay: 5, maxConsecLosses: 2,
     }));
     const g = getGuardrails();
-    expect(g.openLockout).toBe(false);
-    expect(g.cooldownMin).toBe(0);
-    expect(g.maxTradesPerDay).toBe(0);
-    expect(g.maxConsecLosses).toBe(0);
+    expect(g.openLockout).toBe(true);
+    expect(g.cooldownMin).toBe(20);
+    expect(g.maxTradesPerDay).toBe(3);
+    expect(g.maxConsecLosses).toBe(2);
     expect(g.policyVersion).toBe(GUARDRAIL_DEFAULTS.policyVersion);
     // Structural rules the migration must NOT touch.
     expect(g.blockExpiryDay).toBe(true);
