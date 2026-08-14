@@ -308,6 +308,7 @@ export async function fetchPremiumSeries(underlying, strike, type, { expiry = nu
 export async function fetchChronosTiming({ underlying, strike, type, expiry = null, series = [], entryPremium, stopPremium, targetPremium, horizonMin = 10 } = {}) {
   const base = bridgeBaseUrl();
   if (!base) return { ok: false, error: "no bridge URL", model: "chronos-2" };
+  const started = performance.now();
   try {
     const r = await fetch(base + "/ai/timing", {
       method: "POST",
@@ -315,8 +316,8 @@ export async function fetchChronosTiming({ underlying, strike, type, expiry = nu
       body: JSON.stringify({ underlying, strike, type, expiry, series, entryPremium, stopPremium, targetPremium, horizonMin }),
       signal: AbortSignal.timeout(3500),
     });
-    return await r.json();
-  } catch (e) { return { ok: false, error: String(e), model: "chronos-2" }; }
+    return { ...(await r.json()), latencyMs: Math.round(performance.now() - started) };
+  } catch (e) { return { ok: false, error: String(e), model: "chronos-2", latencyMs: Math.round(performance.now() - started) }; }
 }
 
 // Candles in the app's shape for a timeframe over `days` of history — wide

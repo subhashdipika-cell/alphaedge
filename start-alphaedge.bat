@@ -41,7 +41,7 @@ timeout /t 6 >nul
 REM --- Window 2: the option-chain collector (feeds OI + premium history).
 REM     Self-gates on the NSE session, so it idles quietly off-hours. ---
 echo  [2/4] Launching the option-chain collector...
-start "AlphaEdge Collector" cmd /k "pushd ""%~dp0"" && .venv\Scripts\python.exe strategy-lab\dhan_options_collector.py"
+start "AlphaEdge Collector" cmd /k "pushd ""%~dp0"" && .chronos-venv\Scripts\python.exe strategy-lab\dhan_options_collector.py"
 
 REM --- Window 3: the HEADLESS autonomous paper-trade scanner.
 REM     This is what takes paper trades on its own - it scores all four indices
@@ -52,7 +52,7 @@ start "AlphaEdge Scanner" cmd /k "pushd ""%~dp0"" && node scripts\scanner.mjs --
 
 REM --- Window 4: the app UI (port 5001, opens your browser automatically) ---
 echo  [4/4] Launching the AlphaEdge app...
-start "AlphaEdge App" cmd /k "pushd ""%~dp0"" && npm run dev"
+start "AlphaEdge App" cmd /k "pushd ""%~dp0"" && npm run dev -- --port 5001"
 
 echo.
 echo  ============================================================

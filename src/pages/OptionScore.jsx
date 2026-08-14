@@ -217,8 +217,9 @@ export default function OptionScorePage({ onPaperTrade }) {
                     background: C.bg, fontSize: 10, color: timingShadow?.status === "SUPPORTIVE" ? C.green : C.amber }}>
                     <b>AI TIMING SHADOW:</b> {timingShadow?.status || "LOADING"}
                     {timingShadow?.reason ? ` · ${timingShadow.reason}` : " · Chronos service unavailable or not installed"}
+                    {timingShadow?.latencyMs != null && ` · ${timingShadow.latencyMs} ms`}
                     <span style={{ display: "block", color: C.faint, fontSize: 8, marginTop: 3 }}>
-                      Advisory only · existing score and Risk Engine remain authoritative
+                      {timingShadow?.model || "chronos-2"} · {timingShadow?.latencyMs != null ? "service healthy" : "service unavailable"} · advisory only · existing score and Risk Engine remain authoritative
                     </span>
                   </div>
                 )}

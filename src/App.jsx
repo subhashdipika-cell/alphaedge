@@ -5829,6 +5829,7 @@ export default function AlphaEdge() {
         model: result.aiTiming.model, modelVersion: result.aiTiming.modelVersion,
         q10: result.aiTiming.q10, q50: result.aiTiming.q50, q90: result.aiTiming.q90,
         forecastR: result.aiTiming.forecastR, reason: result.aiTiming.reason,
+        latencyMs: result.aiTiming.latencyMs,
         shadowOnly: true,
       } : null,
       // Context features (level engine) — logged for the R&D "which features

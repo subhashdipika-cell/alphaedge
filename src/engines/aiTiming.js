@@ -21,6 +21,7 @@ export function evaluateTimingShadow({
   model = "chronos-2",
   modelVersion = AI_TIMING_VERSION,
   dataTimestamp = null,
+  latencyMs = null,
 } = {}) {
   const entry = finite(entryPremium);
   const lower = finite(q10);
@@ -41,6 +42,7 @@ export function evaluateTimingShadow({
       modelVersion,
       horizonMin,
       dataTimestamp,
+      latencyMs,
     };
   }
 
@@ -69,6 +71,7 @@ export function evaluateTimingShadow({
     modelVersion,
     horizonMin,
     dataTimestamp,
+    latencyMs,
     entryPremium: entry,
     q10: lower,
     q50: median,
@@ -95,5 +98,6 @@ export function timingFromChronosResponse(payload, trade = {}) {
     modelVersion: payload.modelVersion || AI_TIMING_VERSION,
     dataTimestamp: payload.dataTimestamp || null,
     horizonMin: payload.horizonMin || trade.horizonMin || 10,
+    latencyMs: payload.latencyMs ?? null,
   });
 }
