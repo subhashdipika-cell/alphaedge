@@ -11,6 +11,8 @@ Thumbs.db
 
 # ── python envs / caches ─────────────────────────────
 .venv/
+.chronos-venv/
+.bootstrap/
 __pycache__/
 *.pyc
 

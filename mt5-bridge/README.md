@@ -53,3 +53,22 @@ Anything else returns `404` — there is no order endpoint.
   Windows time sync ran (TOTP is time-sensitive).
 - **Empty quotes off-hours** → normal; Dhan serves last-close OHLC, and the
   chain endpoint falls back to the last collected CSV snapshot.
+
+## Chronos-2 paper-shadow timing
+
+The bridge can optionally run the Chronos-2 timing layer for the already
+selected option premium. It remains advisory only: AlphaEdge's deterministic
+score and risk veto stay authoritative, and the bridge places no orders.
+
+The launcher uses `D:\alphaedge\.chronos-venv`. Recreate/install it with:
+
+```powershell
+& "C:\Program Files\PostgreSQL\18\pgAdmin 4\python\python.exe" -m pip install virtualenv
+& "C:\Program Files\PostgreSQL\18\pgAdmin 4\python\python.exe" -m virtualenv --python="C:\Program Files\PostgreSQL\18\pgAdmin 4\python\python.exe" D:\alphaedge\.chronos-venv
+& D:\alphaedge\.chronos-venv\Scripts\python.exe -m pip install -r D:\alphaedge\mt5-bridge\requirements-chronos.txt
+```
+
+The first inference downloads the public `amazon/chronos-2` weights. CPU
+inference is supported; keep the bridge process running so the model remains
+warm. If Chronos is unavailable, `/ai/timing` returns `ok: false` and the
+normal AlphaEdge paper workflow continues unchanged.

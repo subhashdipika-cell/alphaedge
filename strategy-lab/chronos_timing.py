@@ -41,7 +41,7 @@ def forecast_timing(req: dict[str, Any]) -> dict[str, Any]:
 
     try:
         import numpy as np
-        import pandas as pd
+        import torch
         from chronos import Chronos2Pipeline
     except ImportError as exc:
         return _result_error(f"Chronos is not installed: {exc}")
@@ -50,23 +50,13 @@ def forecast_timing(req: dict[str, Any]) -> dict[str, Any]:
         # Keep one process/model resident in the bridge worker. The caller sends
         # the selected option only, so the model never chooses the strike.
         pipeline = _get_pipeline(Chronos2Pipeline)
-        frame = pd.DataFrame({
-            "id": [str(req.get("underlying", "OPTION")) + "_" + str(req.get("strike", ""))] * len(values),
-            "timestamp": pd.date_range(end=datetime.now(timezone.utc), periods=len(values), freq="min"),
-            "target": np.asarray(values, dtype=float),
-        })
-        prediction = pipeline.predict_df(
-            frame,
-            prediction_length=max(1, min(horizon, 30)),
-            quantile_levels=[0.1, 0.5, 0.9],
-            id_column="id",
-            timestamp_column="timestamp",
-            target="target",
-        )
-        row = prediction.iloc[-1].to_dict()
-        quantiles = _extract_quantiles(row)
-        if any(value is None for value in quantiles):
-            return _result_error("Chronos response did not contain q10/q50/q90")
+        history = torch.tensor(np.asarray(values, dtype=np.float32)).reshape(1, 1, -1)
+        # Chronos-2's tensor API is stable across pandas/NumPy versions and
+        # expects (series, variates, history). The returned sample axis is
+        # converted into conservative 10/50/90% endpoint quantiles.
+        samples = pipeline.predict(history, prediction_length=max(1, min(horizon, 30)))[0][0]
+        quantiles = torch.quantile(samples, torch.tensor([0.1, 0.5, 0.9]), dim=0)
+        quantiles = tuple(float(quantiles[i, -1].item()) for i in range(3))
         return {
             "ok": True,
             "shadowOnly": True,
@@ -89,14 +79,3 @@ def _get_pipeline(pipeline_type):
     if _PIPELINE is None:
         _PIPELINE = pipeline_type.from_pretrained("amazon/chronos-2", device_map="cpu")
     return _PIPELINE
-
-
-def _extract_quantiles(row: dict[str, Any]):
-    def find(level):
-        keys = (str(level), f"{level:.1f}", f"q{int(level * 100)}", f"{level * 100:.1f}%")
-        for key in keys:
-            if key in row:
-                return _number(row[key])
-        return None
-
-    return find(0.1), find(0.5), find(0.9)

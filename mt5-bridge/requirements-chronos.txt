@@ -1,0 +1,6 @@
+# Isolated AlphaEdge bridge + Chronos-2 shadow inference environment.
+dhanhq==2.2.0
+chronos-forecasting==2.3.1
+torch>=2.2,<3
+pandas>=2,<4
+numpy>=1.21,<3
