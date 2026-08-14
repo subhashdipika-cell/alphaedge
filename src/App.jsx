@@ -5824,6 +5824,13 @@ export default function AlphaEdge() {
       direction: result.direction,
       summary: result.report.map(l=>`${l.k}: ${l.v}`).join(" · "),
       scoreFactors: Object.fromEntries(Object.entries(result.factors).map(([k,f])=>[k, f.score01])),
+      aiTiming: result.aiTiming ? {
+        status: result.aiTiming.status, allow: result.aiTiming.allow,
+        model: result.aiTiming.model, modelVersion: result.aiTiming.modelVersion,
+        q10: result.aiTiming.q10, q50: result.aiTiming.q50, q90: result.aiTiming.q90,
+        forecastR: result.aiTiming.forecastR, reason: result.aiTiming.reason,
+        shadowOnly: true,
+      } : null,
       // Context features (level engine) — logged for the R&D "which features
       // separate winners from losers" analysis.
       structure: result.structure ? {

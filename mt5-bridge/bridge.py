@@ -38,6 +38,17 @@ except ImportError:
 
 import oi_metrics  # Trending-OI + premium series from the collected chain CSVs
 
+# Optional Chronos inference. The bridge remains fully usable without the
+# package; /ai/timing returns an explicit unavailable response instead.
+try:
+    import sys
+    _strategy_lab = pathlib.Path(__file__).resolve().parent.parent / "strategy-lab"
+    if str(_strategy_lab) not in sys.path:
+        sys.path.insert(0, str(_strategy_lab))
+    from chronos_timing import forecast_timing
+except ImportError:
+    forecast_timing = None
+
 
 # ─── CONFIG — edit these to taste ─────────────────────────────────────────────
 HOST = "127.0.0.1"
@@ -832,6 +843,13 @@ class Handler(BaseHTTPRequestHandler):
                 expiry=body.get("expiry"), since_ts=body.get("sinceTs"),
             )
             self._send(200 if result.get("ok") else 400, result)
+            return
+        if parsed.path.startswith("/ai/timing"):
+            result = forecast_timing(body) if forecast_timing else {
+                "ok": False, "shadowOnly": True, "model": "chronos-2",
+                "error": "Chronos timing module unavailable",
+            }
+            self._send(200, result)
             return
         if parsed.path.startswith("/obsidian/monthly"):
             result = write_monthly_export(body)

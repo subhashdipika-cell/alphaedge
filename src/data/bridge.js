@@ -302,6 +302,23 @@ export async function fetchPremiumSeries(underlying, strike, type, { expiry = nu
   } catch (e) { return { ok: false, error: String(e) }; }
 }
 
+// Optional local Chronos timing service. It is intentionally separate from
+// scoreOption so a missing model, slow inference, or bridge error cannot alter
+// the deterministic signal or bypass the risk engine.
+export async function fetchChronosTiming({ underlying, strike, type, expiry = null, series = [], entryPremium, stopPremium, targetPremium, horizonMin = 10 } = {}) {
+  const base = bridgeBaseUrl();
+  if (!base) return { ok: false, error: "no bridge URL", model: "chronos-2" };
+  try {
+    const r = await fetch(base + "/ai/timing", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ underlying, strike, type, expiry, series, entryPremium, stopPremium, targetPremium, horizonMin }),
+      signal: AbortSignal.timeout(3500),
+    });
+    return await r.json();
+  } catch (e) { return { ok: false, error: String(e), model: "chronos-2" }; }
+}
+
 // Candles in the app's shape for a timeframe over `days` of history — wide
 // enough for the score engine's 50-bar trend/ADX reads (1H needs ~10 days).
 async function scoreCandles(underlying, tf, days) {

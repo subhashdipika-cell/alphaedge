@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { ASSETS } from "../data/constants.js";
-import { fetchScoreInputs } from "../data/bridge.js";
+import { fetchScoreInputs, fetchPremiumSeries, fetchChronosTiming } from "../data/bridge.js";
 import { analyzeOiTrend } from "../engines/oi.js";
 import { scoreOption } from "../engines/score.js";
 import { getMoneyMgt } from "../state/settings.js";
@@ -8,6 +8,7 @@ import { getRiskPolicy } from "../state/settings.js";
 import { loadHistory } from "../state/history.js";
 import { estimateCost } from "../engines/resolve.js";
 import { eventProximity } from "../data/events.js";
+import { timingFromChronosResponse } from "../engines/aiTiming.js";
 
 // ─── OPTION SCORE — the 0–100 decision engine, explained ──────────────────────
 
@@ -48,6 +49,7 @@ export default function OptionScorePage({ onPaperTrade }) {
   const [expanded, setExpanded] = useState(null);
   const [styleOverride, setStyleOverride] = useState(null);  // null = auto-select
   const [expiryOverride, setExpiryOverride] = useState(null); // null = nearest
+  const [timingShadow, setTimingShadow] = useState(null);
 
   useEffect(() => { loadHistory().then(setHistory); }, []);
   useEffect(() => { setExpiryOverride(null); }, [underlying]);  // reset expiry when switching index
@@ -79,6 +81,33 @@ export default function OptionScorePage({ onPaperTrade }) {
       history, events: eventProximity(underlying), mm: getMoneyMgt(), riskPct: getRiskPolicy().maxRiskPct,
     });
   }, [raw, history, underlying, styleOverride]);
+
+  // Shadow-only timing review for the already-selected option. This does not
+  // modify result.verdict, result.plan, or the Risk Engine's veto authority.
+  useEffect(() => {
+    let cancelled = false;
+    setTimingShadow(null);
+    if (!result?.strike || !result?.plan || result.verdict === "NO_TRADE") return () => { cancelled = true; };
+    const run = async () => {
+      const type = result.direction;
+      const premium = await fetchPremiumSeries(underlying, result.strike.strike, type, { expiry: result.strike.expiry });
+      const series = Array.isArray(premium?.series) ? premium.series.slice(-120).map(p => ({
+        timestamp: p.timestamp || p.ts || p.t,
+        target: Number(p.ltp ?? p.close ?? p.price),
+      })).filter(p => Number.isFinite(p.target)) : [];
+      const response = await fetchChronosTiming({
+        underlying, strike: result.strike.strike, type, expiry: result.strike.expiry,
+        series, entryPremium: result.plan.entry, stopPremium: result.plan.slPrice,
+        targetPremium: result.plan.tgtPrice, horizonMin: result.plan.maxHoldMin || 10,
+      });
+      if (!cancelled) setTimingShadow(timingFromChronosResponse(response, {
+        entryPremium: result.plan.entry, stopPremium: result.plan.slPrice,
+        targetPremium: result.plan.tgtPrice, horizonMin: result.plan.maxHoldMin || 10,
+      }));
+    };
+    run().catch(() => { if (!cancelled) setTimingShadow(timingFromChronosResponse({ ok: false }, {})); });
+    return () => { cancelled = true; };
+  }, [result, underlying]);
 
   const label = ASSETS.find(a => a.id === underlying)?.label || underlying;
 
@@ -170,7 +199,7 @@ export default function OptionScorePage({ onPaperTrade }) {
                   <div style={{ marginTop: 10, display: "flex", gap: 8, alignItems: "center" }}>
                     <button
                       disabled={!result.plan?.affordable}
-                      onClick={() => onPaperTrade && onPaperTrade(result)}
+                      onClick={() => onPaperTrade && onPaperTrade({ ...result, aiTiming: timingShadow })}
                       style={{ padding: "8px 18px", borderRadius: 8, border: "none", fontSize: 11, fontWeight: 800, fontFamily: "monospace",
                         cursor: result.plan?.affordable ? "pointer" : "not-allowed",
                         background: result.plan?.affordable ? "linear-gradient(135deg,#1d4ed8,#7c3aed)" : "#1e2a3a",
@@ -180,6 +209,17 @@ export default function OptionScorePage({ onPaperTrade }) {
                     {!result.plan?.affordable && (
                       <span style={{ fontSize: 9, color: C.amber }}>0 lots at {fmt(getRiskPolicy().maxRiskPct)}% risk — raise risk %, pick a cheaper strike, or add capital</span>
                     )}
+                  </div>
+                )}
+                {result.verdict !== "NO_TRADE" && result.strike && (
+                  <div style={{ marginTop: 10, padding: "8px 10px", borderRadius: 7,
+                    border: `0.5px solid ${timingShadow?.status === "SUPPORTIVE" ? C.green : timingShadow?.status === "CAUTION" ? C.amber : C.edge}55`,
+                    background: C.bg, fontSize: 10, color: timingShadow?.status === "SUPPORTIVE" ? C.green : C.amber }}>
+                    <b>AI TIMING SHADOW:</b> {timingShadow?.status || "LOADING"}
+                    {timingShadow?.reason ? ` · ${timingShadow.reason}` : " · Chronos service unavailable or not installed"}
+                    <span style={{ display: "block", color: C.faint, fontSize: 8, marginTop: 3 }}>
+                      Advisory only · existing score and Risk Engine remain authoritative
+                    </span>
                   </div>
                 )}
               </Card>
