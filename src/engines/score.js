@@ -437,7 +437,14 @@ export function scoreOption(inputs) {
   // half-size), so selectStrike can step to a cheaper in-band strike when one
   // lot of the ideal strike would bust the budget (indivisible-lot problem).
   const riskBudget = (Number(mm.capital) || 0) * ((riskPct * sizeFactor) / 100);
-  const pick = selectStrike({ chain, direction, minPremium: minPrem, expected: em, strikePref,
+  // The selected-option quality gate defaults to |delta| <= 0.60. Clamp the
+  // selector to the same ceiling for Indian option workflows so it cannot pick
+  // a 0.65-delta leg that the next validation stage must reject.
+  const selectionStrikePref = indexOptionWorkflow
+    ? { ...strikePref, deltaHi: Math.min(Number(strikePref?.deltaHi ?? 0.65), Number(
+        (sensexOptionWorkflow ? inputs.sensexOptionConfig : inputs.niftyOptionScalpConfig)?.maxDelta ?? 0.60)) }
+    : strikePref;
+  const pick = selectStrike({ chain, direction, minPremium: minPrem, expected: em, strikePref: selectionStrikePref,
                               budget: riskBudget, underlying, mm, stopUnder: structStop?.stopUnder ?? null });
   const chosenLeg = pick?.leg || null;
   const factors = scoreDir(direction, chosenLeg);

@@ -259,6 +259,7 @@ def _optionchain_from_csv(under_name, rng):
         for r in snap:
             sk = float(r.get("strike") or 0)
             leg = {"ltp": float(r.get("ltp") or 0), "oi": float(r.get("oi") or 0),
+                   "volume": float(r.get("volume") or 0),
                    "iv": round(float(r.get("iv") or 0), 2), "delta": round(float(r.get("delta") or 0), 3),
                    "theta": round(float(r.get("theta") or 0), 2),
                    "bid": round(float(r.get("bid") or 0), 2), "ask": round(float(r.get("ask") or 0), 2)}
@@ -270,8 +271,8 @@ def _optionchain_from_csv(under_name, rng):
         ai = sks.index(atm)
         sel = sks[max(0, ai - rng):min(len(sks), ai + rng + 1)]
         out = [{"strike": round(s, 2), "atm": s == atm,
-                "ce": by_strike[s].get("ce", {"ltp":0,"oi":0,"iv":0,"delta":0,"theta":0}),
-                "pe": by_strike[s].get("pe", {"ltp":0,"oi":0,"iv":0,"delta":0,"theta":0})} for s in sel]
+                "ce": by_strike[s].get("ce", {"ltp":0,"oi":0,"volume":0,"iv":0,"delta":0,"theta":0}),
+                "pe": by_strike[s].get("pe", {"ltp":0,"oi":0,"volume":0,"iv":0,"delta":0,"theta":0})} for s in sel]
         return {"ok": True, "underlying": under_name, "under_ltp": round(under, 2), "expiry": expiry,
                 "isExpiryToday": False, "atmStrike": atm,
                 "ivPercentile": _atm_iv_percentile(under_name, by_strike[atm].get("ce", {}).get("iv", 0)),
@@ -347,6 +348,7 @@ def dhan_optionchain(req):
                 x = node.get(t) or {}
                 g = x.get("greeks") or {}
                 return {"ltp": x.get("last_price", 0), "oi": x.get("oi", 0),
+                        "volume": x.get("volume", x.get("total_traded_volume", 0)),
                         "iv": round(float(x.get("implied_volatility") or 0), 2),
                         "delta": round(float(g.get("delta") or 0), 3),
                         "theta": round(float(g.get("theta") or 0), 2),
