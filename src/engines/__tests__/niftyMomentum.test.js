@@ -12,6 +12,13 @@ function candles(n = 80, start = 24000, step = 8) {
 }
 
 describe("Dhan NIFTY option-premium scalp context", () => {
+  it("fails closed instead of crashing when Dhan candles are null", () => {
+    const r = analyzeNiftyIndexContext({ candles5m: null, candles15m: null });
+    expect(r.direction).toBe("NO_TRADE");
+    expect(r.regime).toBe("INSUFFICIENT_DATA");
+    expect(r.gates[0]).toMatch(/Insufficient Dhan NIFTY chart history/);
+  });
+
   it("uses the NIFTY chart to establish directional context", () => {
     const c5 = candles(100, 24000, 8), c15 = candles(100, 24000, 20);
     const r = analyzeNiftyIndexContext({ candles5m: c5, candles15m: c15, nowMin: 10 * 60 });

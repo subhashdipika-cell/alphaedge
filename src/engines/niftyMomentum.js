@@ -55,10 +55,14 @@ export function analyzeIndexContext({ underlying = "NIFTY50", candles5m = [], ca
   const cfg = { ...baseConfig, ...config };
   const label = underlying === "SENSEX" ? "SENSEX" : "NIFTY";
   const gates = [], reasons = [];
-  if (candles5m.length < cfg.minIndexCandles || candles15m.length < 40)
+  // Dhan can return null for a temporarily unavailable timeframe. Treat that
+  // as missing market data and return a normal NO_TRADE gate; never let a
+  // transient data response crash the entire React application.
+  const c5 = Array.isArray(candles5m) ? candles5m : [];
+  const c = Array.isArray(candles15m) ? candles15m : [];
+  if (c5.length < cfg.minIndexCandles || c.length < 40)
     return { allowed: false, regime: "INSUFFICIENT_DATA", direction: "NO_TRADE", gates: [`Insufficient Dhan ${label} chart history`], reasons };
 
-  const c = candles15m, c5 = candles5m;
   const { e20, e50 } = calcEMAs(c), { e20: e205, e50: e505 } = calcEMAs(c5);
   const atr = n(last(calcATR(c))), atr5 = n(last(calcATR(c5)));
   const px = n(last(c)?.close), px5 = n(last(c5)?.close);
