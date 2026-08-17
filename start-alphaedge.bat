@@ -69,6 +69,7 @@ echo   Paper Trades page -^> "Autonomous Scanner" section.
 echo.
 echo   PAPER ONLY - AlphaEdge places NO real broker orders.
 echo   Keep these windows open while trading - closing them stops it.
+echo   Dhan token refresh runs automatically before the bridge starts.
 echo  ============================================================
 echo   This launcher window will close on its own.
 timeout /t 10 >nul
