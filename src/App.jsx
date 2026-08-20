@@ -1037,74 +1037,67 @@ function runBacktest(candles, stratId) {
       return atr;
     };
 
-    const HF = 9, HS = 20, RSIP = 9, PLB = 20;
-    // Fine-tuned thresholds: 30/70 are practical for crypto/forex 1H
-    // RSI 25/75 is too strict — BTC hourly rarely touches those extremes
-    const RSI_OS = 30, RSI_OB = 70, SL_ATR = 1.5, RR = 2.5;
+    const HMA_OPEN = 5, HMA_CLOSE = 12, RSIP = 9, PLB = 2;
+    const RSI_OS = 25, RSI_OB = 75, CMO_BUY = 50, CMO_SELL = -50, SL_ATR = 1.5, RR = 3;
     const MIN_GAP = 0.002;
 
+    const opens  = candles.map(c => c.open);
     const closes = candles.map(c => c.close);
     const highs  = candles.map(c => c.high);
     const lows   = candles.map(c => c.low);
-    const hmaF   = calcHma(closes, HF);
-    const hmaS   = calcHma(closes, HS);
+    const hmaOpen = calcHma(opens, HMA_OPEN);
+    const hmaClose = calcHma(closes, HMA_CLOSE);
     const rsi    = calcRsi(closes, RSIP);
     const atr    = calcAtr(candles, 14);
-    // CMO = spread between fast HMA and slow HMA (positive = bullish momentum, negative = bearish)
-    // This correctly captures institutional momentum shifts at S/R levels
-    const cmo    = hmaF.map((v, i) => (v != null && hmaS[i] != null && hmaS[i] > 0)
-      ? (v - hmaS[i]) / hmaS[i] * 100
-      : null);
+    // Pine equivalent:
+    // src1 = hma(open, 5)[1], src2 = hma(close, 12), then CMO from their changes.
+    const cmo = closes.map((_, i) => {
+      if (i < 2 || hmaOpen[i - 1] == null || hmaOpen[i - 2] == null || hmaClose[i] == null || hmaClose[i - 1] == null) return null;
+      const momm1 = hmaOpen[i - 1] - hmaOpen[i - 2];
+      const momm2 = hmaClose[i] - hmaClose[i - 1];
+      const m1 = momm1 >= momm2 ? momm1 : 0;
+      const m2 = momm1 >= momm2 ? 0 : -momm1;
+      const div = m1 + m2;
+      return div ? 100 * (m1 - m2) / div : 0;
+    });
 
-    const START = Math.max(HS * 2, PLB + 1, 14);
+    const START = Math.max(HMA_CLOSE * 2, PLB + 1, 14);
     let lastSup = null, lastRes = null;
 
     for (let i = START; i < candles.length - 1; i++) {
-      const c    = closes[i];
-      const cPrv = closes[i - 1];
-      const r    = rsi[i];
-      const rPrv = rsi[i - 1];
-      const cm   = cmo[i];
-      const cmPrv= cmo[i - 1];
-      const a    = atr[i];
-      if (r == null || cm == null || cmPrv == null || a == null || a <= 0) continue;
+      const r  = rsi[i];
+      const cm = cmo[i];
+      const a  = atr[i];
+      if (r == null || cm == null || a == null || a <= 0) continue;
 
-      const pivH = Math.max(...highs.slice(i - PLB, i + 1));
-      const pivL = Math.min(...lows.slice(i - PLB, i + 1));
+      const pivH = Math.max(...highs.slice(i - PLB + 1, i + 1));
+      const pivL = Math.min(...lows.slice(i - PLB + 1, i + 1));
+      const entry = candles[i + 1].open || closes[i];
 
       let win = null, sl, tp, risk;
 
-      // SUPPORT / BUY:
-      //   - RSI was oversold last bar (< OS threshold) and is now recovering (still < OB)
-      //   - CMO positive: fast HMA above slow HMA → bullish momentum building at support
-      //   - Price within ±1.5% band of the rolling pivot low (the S/R zone)
-      const buyRsi  = rPrv < RSI_OS && r < RSI_OB;
-      const buyZone = c >= pivL * 0.985 && c <= pivL * 1.015;
-      if (buyRsi && cm > 0 && buyZone) {
+      // SUPPORT / BUY: RSI<25, CMO>50, fresh legacy low pivot. Signal executes
+      // on the next candle to model the script's "After Candle Close" mode.
+      if (r < RSI_OS && cm > CMO_BUY && Number.isFinite(pivL)) {
         if (lastSup !== null && Math.abs(pivL - lastSup) / Math.abs(lastSup) < MIN_GAP) continue;
         sl   = pivL - a * SL_ATR;
-        risk = c - sl;
+        risk = entry - sl;
         if (risk <= 0) continue;
-        tp      = c + risk * RR;
+        tp      = entry + risk * RR;
         lastSup = pivL;
         const nx = candles[i + 1];
         if (nx.low  <= sl) win = false;
         else if (nx.high >= tp) win = true;
         else win = Math.random() > 0.37;
 
-      // RESISTANCE / SELL:
-      //   - RSI was overbought last bar (> OB threshold) and is now retreating (still > OS)
-      //   - CMO negative: fast HMA below slow HMA → bearish momentum building at resistance
-      //   - Price within ±1.5% band of the rolling pivot high (the S/R zone)
+      // RESISTANCE / SELL: RSI>75, CMO<-50, fresh legacy high pivot.
       } else {
-        const sellRsi  = rPrv > RSI_OB && r > RSI_OS;
-        const sellZone = c >= pivH * 0.985 && c <= pivH * 1.015;
-        if (sellRsi && cm < 0 && sellZone) {
+        if (r > RSI_OB && cm < CMO_SELL && Number.isFinite(pivH)) {
           if (lastRes !== null && Math.abs(pivH - lastRes) / Math.abs(lastRes) < MIN_GAP) continue;
           sl   = pivH + a * SL_ATR;
-          risk = sl - c;
+          risk = sl - entry;
           if (risk <= 0) continue;
-          tp      = c - risk * RR;
+          tp      = entry - risk * RR;
           lastRes = pivH;
           const nx = candles[i + 1];
           if (nx.high >= sl) win = false;
@@ -4619,6 +4612,109 @@ function HistoryPage({ history: allHistory, setHistory }) {
 }
 
 
+function StrategyLabPage({ candles, prices }) {
+  const [asset, setAsset] = useState("NIFTY50");
+  const [tf, setTf] = useState("15m");
+  const [strategy, setStrategy] = useState("adaptive_sr");
+  const rows = STRATEGIES.filter(s => s.active || s.id === "adaptive_sr");
+  const series = candles?.[asset] || [];
+  const result = useMemo(() => series.length > 30 ? runBacktest(series, strategy) : null, [series, strategy]);
+  const selected = STRATEGIES.find(s => s.id === strategy) || rows[0];
+  const metric = (label, value, color="#e2e8f0") => (
+    <div style={{background:"#060d17",border:"0.5px solid #1e3a5a",borderRadius:8,padding:"9px 10px"}}>
+      <div style={{fontSize:8,color:"#94a3b8",letterSpacing:"0.06em",marginBottom:4}}>{label.toUpperCase()}</div>
+      <div style={{fontSize:18,fontWeight:800,color,fontFamily:"monospace"}}>{value}</div>
+    </div>
+  );
+  const adaptive = strategy === "adaptive_sr";
+
+  return (
+    <div style={{height:"100%",overflow:"auto"}}>
+      <div style={{maxWidth:1100,margin:"0 auto",display:"flex",flexDirection:"column",gap:10}}>
+        <div style={{background:"#0a1628",border:"0.5px solid #1e3a5a",borderRadius:12,padding:14}}>
+          <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:12}}>
+            <div style={{fontSize:9,color:"#94a3b8",letterSpacing:"0.1em"}}>STRATEGY LAB</div>
+            <select value={asset} onChange={e=>setAsset(e.target.value)}
+              style={{background:"#060d17",border:"0.5px solid #1e3a5a",borderRadius:6,padding:"6px 10px",color:"#e2e8f0",fontSize:12,fontFamily:"monospace"}}>
+              {ASSETS.map(a=><option key={a.id} value={a.id}>{a.label}</option>)}
+            </select>
+            <select value={tf} onChange={e=>setTf(e.target.value)}
+              style={{background:"#060d17",border:"0.5px solid #1e3a5a",borderRadius:6,padding:"6px 10px",color:"#e2e8f0",fontSize:12,fontFamily:"monospace"}}>
+              {["1m","5m","15m","1H","4H","1D"].map(t=><option key={t} value={t}>{t}</option>)}
+            </select>
+            <span style={{marginLeft:"auto",fontSize:10,color:"#7c8ea8",fontFamily:"monospace"}}>
+              {series.length} candles · live {Number(prices?.[asset] || 0).toLocaleString("en-IN",{maximumFractionDigits:2})}
+            </span>
+          </div>
+
+          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}}>
+            {rows.map(s=>(
+              <div key={s.id} onClick={()=>setStrategy(s.id)}
+                style={{background:strategy===s.id?(CAT_COLOR[s.cat]||"#60a5fa")+"18":"#060d17",
+                  border:`0.5px solid ${strategy===s.id?(CAT_COLOR[s.cat]||"#60a5fa"):"#1e3a5a"}`,
+                  borderRadius:8,padding:"9px 10px",cursor:"pointer"}}>
+                <div style={{fontSize:11,fontWeight:800,color:strategy===s.id?(CAT_COLOR[s.cat]||"#60a5fa"):"#cbd5e1"}}>{s.name}</div>
+                <div style={{fontSize:8,color:"#7c8ea8",marginTop:4}}>{s.cat} · active strategy</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {adaptive && (
+          <div style={{background:"#0a1628",border:"0.5px solid #06b6d440",borderRadius:12,padding:14}}>
+            <div style={{fontSize:9,color:"#06b6d4",letterSpacing:"0.1em",marginBottom:10}}>ADAPTIVE SUPPORT & RESISTANCE PRO</div>
+            <div style={{fontSize:11,color:"#cbd5e1",lineHeight:1.6,marginBottom:10}}>
+              Dynamic S/R strategy based on institutional supply and demand zones. It confirms fresh support with RSI 9 below 25, HMA-based CMO above 50, and a new legacy low pivot. It confirms fresh resistance with RSI 9 above 75, HMA-based CMO below -50, and a new legacy high pivot.
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}}>
+              {[
+                ["Momentum","CMO from HMA(open,5)[1] vs HMA(close,12)"],
+                ["Relative Strength","RSI 9: BUY <25, SELL >75"],
+                ["Structure","Legacy 2-candle high/low pivots"],
+                ["Signal Rule","One BUY/SELL per new S/R level"],
+              ].map(([h,b])=>(
+                <div key={h} style={{background:"#060d17",border:"0.5px solid #1e3a5a",borderRadius:8,padding:"9px 10px"}}>
+                  <div style={{fontSize:8,color:"#06b6d4",letterSpacing:"0.06em",marginBottom:5}}>{h.toUpperCase()}</div>
+                  <div style={{fontSize:10,color:"#94a3b8",lineHeight:1.45}}>{b}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div style={{background:"#0a1628",border:"0.5px solid #1e3a5a",borderRadius:12,padding:14}}>
+          <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
+            <div style={{fontSize:9,color:"#94a3b8",letterSpacing:"0.1em"}}>{selected?.name?.toUpperCase()} BACKTEST</div>
+            <span style={{fontSize:9,color:"#7c8ea8"}}>Uses current in-app candle series for {ASSETS.find(a=>a.id===asset)?.label || asset}</span>
+          </div>
+          {result ? (
+            <>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:8,marginBottom:12}}>
+                {metric("Trades", result.totalTrades, "#e2e8f0")}
+                {metric("Win Rate", `${result.winRate.toFixed(1)}%`, result.winRate>=55?"#22c55e":"#f59e0b")}
+                {metric("Profit Factor", result.profitFactor.toFixed(2), result.profitFactor>=1.2?"#22c55e":"#ef4444")}
+                {metric("Return", `${result.totalReturn.toFixed(1)}%`, result.totalReturn>=0?"#22c55e":"#ef4444")}
+                {metric("Max DD", `${result.maxDD.toFixed(1)}%`, "#f59e0b")}
+                {metric("Sharpe", result.sharpe.toFixed(2), "#60a5fa")}
+              </div>
+              <div style={{height:90,display:"flex",alignItems:"end",gap:2,background:"#060d17",border:"0.5px solid #1e3a5a",borderRadius:8,padding:8}}>
+                {(result.curve || []).slice(-80).map((v,i,a)=>{
+                  const lo = Math.min(...a), hi = Math.max(...a);
+                  const pct = hi > lo ? (v - lo) / (hi - lo) : 0.5;
+                  return <div key={i} style={{flex:1,height:`${Math.max(6,pct*76)}px`,background:v>=a[0]?"#22c55e":"#ef4444",opacity:0.75,borderRadius:"2px 2px 0 0"}}/>;
+                })}
+              </div>
+            </>
+          ) : (
+            <div style={{fontSize:11,color:"#7c8ea8",padding:24,textAlign:"center"}}>Not enough candle data yet. Keep the bridge running or refresh market data.</div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 // ─── OPTIONS DESK — live Greeks/IV strike selector ───────────────────────────
 // Surfaces delta / IV / OI for ATM±N strikes and recommends the right strike to
 // BUY, flagging the audit's flaws (far-OTM lottery, 0-DTE, premium floor).
@@ -5875,6 +5971,8 @@ export default function AlphaEdge() {
     <PaperTradesPage key="paper"/>,
 
     <RnDPage key="rnd"/>,
+
+    <StrategyLabPage key="strategy-lab" candles={candles} prices={prices}/>,
 
     <HistoryPage key="hist"
       history={history} setHistory={setHistory}/>,
