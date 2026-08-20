@@ -261,6 +261,7 @@ function replayDay({ file, underlying, date }, candleHist) {
     const r = scoreOption({
       underlying, candles5m: c5, candles15m: c15, candles1H: c1h,
       chain, oi, vix: null, history: [], events: {}, mm: { capital: CFG.capital, rr: 2 }, riskPct: CFG.risk,
+      nowMin: mins, atNow: replayTs, asOfTs: replayTs,
       dhanOptionScalp: CFG.variant !== "legacy" && underlying === "NIFTY50",
       sensexOptionWorkflow: CFG.variant !== "legacy" && underlying === "SENSEX",
       optionWorkflow: CFG.variant !== "legacy",

@@ -318,7 +318,11 @@ export function scoreOption(inputs) {
   // to enter from a score without confirmation on the chosen option.
   const indexOptionWorkflow = indianOption && (inputs.optionWorkflow === true || niftyOptionWorkflow || sensexOptionWorkflow);
   const forceNiftyScalp = inputs.dhanOptionScalp === true && inputs.niftyOptionWorkflow !== true;
-  const dteYears = chain?.expiry ? Math.max(2 / 24, (new Date(`${chain.expiry}T15:30:00+05:30`).getTime() - Date.now()) / 86400000) / 365 : (1 / 365);
+  // Replay and historical analysis must use the observation timestamp, not the
+  // workstation clock. Otherwise an old option chain gets today's DTE and the
+  // current late-session style, making the replay non-point-in-time.
+  const asOfMs = Number.isFinite(inputs.asOfTs) ? Number(inputs.asOfTs) : Date.now();
+  const dteYears = chain?.expiry ? Math.max(2 / 24, (new Date(`${chain.expiry}T15:30:00+05:30`).getTime() - asOfMs) / 86400000) / 365 : (1 / 365);
   const eventInDTE = eventToday || (eventMin != null && eventMin >= 0 && eventMin / (60 * 24) < dteYears * 365);
 
   // Regime read (logged + can veto).
@@ -330,7 +334,7 @@ export function scoreOption(inputs) {
     ? { style: "SCALP", label: "Dhan NIFTY Option Scalp", reasons: ["NIFTY index context to option-premium confirmation"], alternatives: [] }
     : inputs.style
     ? { style: inputs.style, label: STYLE_STRIKE[inputs.style] ? inputs.style : inputs.style, reasons: ["Manual style override"], alternatives: [] }
-    : selectStyle({ regime, vix, dteYears, ivp: chain?.ivPercentile ?? null });
+    : selectStyle({ regime, vix, dteYears, ivp: chain?.ivPercentile ?? null, atNow: inputs.atNow });
   const style = styleSel.style;
   const strikePref = getStrikePref(style);
   // 0-DTE is allowed for SCALP only, tightly: a hard 15-min time-stop and a
