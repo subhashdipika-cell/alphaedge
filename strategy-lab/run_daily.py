@@ -49,12 +49,20 @@ def release_awake():
 # scheduled task still points at 3.14), re-exec under the venv. Subprocesses then
 # inherit sys.executable = the venv python.
 _VENV_PY = r"D:\alphaedge\.venv\Scripts\python.exe"
+_DHAN_PY = r"D:\alphaedge\.chronos-venv\Scripts\python.exe"
 if os.path.exists(_VENV_PY) and os.path.normcase(sys.executable) != os.path.normcase(_VENV_PY):
     raise SystemExit(subprocess.call([_VENV_PY, os.path.abspath(__file__), *sys.argv[1:]]))
 
 ROOT       = Path(__file__).parent
 WIKI_ROOT  = Path(r"E:\Obsidian\Trading_Mind\wiki")
 LOG_FILE   = ROOT / "daily_runner.log"
+
+
+def dhan_python() -> str:
+    """Use the shared Dhan-capable runtime for every market-data subprocess."""
+    if os.path.exists(_DHAN_PY):
+        return _DHAN_PY
+    return sys.executable
 
 
 def log(msg):
@@ -72,7 +80,7 @@ def start_options_collector():
         return None
     log("Starting Dhan options-chain collector (parallel)...")
     return subprocess.Popen(
-        [sys.executable, str(ROOT / "dhan_options_collector.py")],
+        [dhan_python(), str(ROOT / "dhan_options_collector.py")],
         stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True,
     )
 
@@ -108,7 +116,7 @@ def refresh_dhan_token():
     """Auto-refresh the 24h Dhan access token via PIN+TOTP, if configured."""
     try:
         proc = subprocess.run(
-            [sys.executable, str(ROOT / "dhan_token_refresh.py")],
+            [dhan_python(), str(ROOT / "dhan_token_refresh.py")],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60,
         )
         out = (proc.stdout or "").strip()
@@ -131,7 +139,7 @@ def run_dhan_collector(days: int):
     log(f"Pulling Dhan intraday data (last {days} days)...")
     try:
         proc = subprocess.run(
-            [sys.executable, str(ROOT / "dhan_collector.py"), "--days", str(days)],
+            [dhan_python(), str(ROOT / "dhan_collector.py"), "--days", str(days)],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=600,
         )
         for line in (proc.stdout or "").splitlines():
@@ -155,7 +163,7 @@ def run_zerohero_index_collector(days: int):
     log(f"Refreshing Zero-Hero spot index candles (last {days} days)...")
     try:
         proc = subprocess.run(
-            [sys.executable, str(ROOT / "collect_zerohero_history.py"),
+            [dhan_python(), str(ROOT / "collect_zerohero_history.py"),
              "--days", str(days), "--intervals", "1,5"],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=600,
         )
