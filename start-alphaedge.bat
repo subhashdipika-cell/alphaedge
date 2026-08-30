@@ -2,6 +2,8 @@
 title AlphaEdge Launcher
 color 0B
 cd /d "%~dp0"
+set "LOGDIR=%~dp0work\launcher-logs"
+if not exist "%LOGDIR%" mkdir "%LOGDIR%"
 
 echo  ============================================================
 echo    Starting AlphaEdge  -  Indian index-options (PAPER ONLY)
@@ -32,7 +34,7 @@ if "%PORT_CONFLICT%"=="1" (
     echo  AlphaEdge did not stop or replace the process using that port.
     echo  Close the conflicting application or change its port, then try again.
     echo.
-    pause
+    if /i not "%TRADING_LAB_HIDDEN%"=="1" pause
     exit /b 1
 )
 
@@ -40,19 +42,37 @@ if "%BRIDGE_READY%"=="1" echo  [READY] Reusing the AlphaEdge bridge on port 5000
 if "%APP_READY%"=="1" echo  [READY] Reusing the AlphaEdge app on port 5001.
 
 REM --- Check Node.js is installed ---
-node --version >nul 2>&1
+node.exe --version >nul 2>&1
 if errorlevel 1 (
     echo  [ERROR] Node.js is not installed.
     echo  Install it from https://nodejs.org  ^(LTS version^), then run this again.
     echo.
-    pause
+    if /i not "%TRADING_LAB_HIDDEN%"=="1" pause
     exit /b 1
 )
 
 REM --- Install app dependencies on the first run ---
+where npm.cmd >nul 2>&1
+if errorlevel 1 (
+    echo  [ERROR] npm.cmd is not available in PATH.
+    if /i not "%TRADING_LAB_HIDDEN%"=="1" pause
+    exit /b 1
+)
+
+if not exist ".chronos-venv\Scripts\python.exe" (
+    echo  [ERROR] AlphaEdge Python environment is missing: .chronos-venv
+    if /i not "%TRADING_LAB_HIDDEN%"=="1" pause
+    exit /b 1
+)
+
 if not exist "node_modules" (
     echo  First run: installing dependencies ^(this takes 1-2 minutes^)...
-    call npm install
+    call npm.cmd install
+    if errorlevel 1 (
+        echo  [ERROR] Dependency installation failed.
+        if /i not "%TRADING_LAB_HIDDEN%"=="1" pause
+        exit /b 1
+    )
     echo.
 )
 
@@ -61,7 +81,11 @@ if "%BRIDGE_READY%"=="1" (
     echo  [1/4] Dhan data bridge is already running.
 ) else (
     echo  [1/4] Launching the Dhan data bridge...
-    start "AlphaEdge Dhan Bridge" cmd /k "pushd ""%~dp0mt5-bridge"" && run.bat"
+    if /i "%TRADING_LAB_HIDDEN%"=="1" (
+        start "" /b cmd.exe /d /c "cd /d ""%~dp0mt5-bridge"" && call run.bat 1^>^>""%LOGDIR%\bridge.log"" 2^>^&1"
+    ) else (
+        start "AlphaEdge Dhan Bridge" cmd.exe /k "cd /d ""%~dp0mt5-bridge"" && call run.bat"
+    )
 )
 
 REM --- Give the bridge a few seconds to bind :5000 before the collector and
@@ -75,7 +99,11 @@ if not errorlevel 1 (
     echo  [2/4] Option-chain collector is already running.
 ) else (
     echo  [2/4] Launching the option-chain collector...
-    start "AlphaEdge Collector" cmd /k "pushd ""%~dp0"" && .chronos-venv\Scripts\python.exe strategy-lab\dhan_options_collector.py"
+    if /i "%TRADING_LAB_HIDDEN%"=="1" (
+        start "" /b ".chronos-venv\Scripts\python.exe" "strategy-lab\dhan_options_collector.py" 1^>^>"%LOGDIR%\collector.log" 2^>^&1
+    ) else (
+        start "AlphaEdge Collector" cmd.exe /k "cd /d ""%~dp0"" && .chronos-venv\Scripts\python.exe strategy-lab\dhan_options_collector.py"
+    )
 )
 
 REM --- Window 3: the HEADLESS autonomous paper-trade scanner.
@@ -87,7 +115,11 @@ if not errorlevel 1 (
     echo  [3/4] Autonomous paper-trade scanner is already running.
 ) else (
     echo  [3/4] Launching the autonomous paper-trade scanner...
-    start "AlphaEdge Scanner" cmd /k "pushd ""%~dp0"" && node scripts\scanner.mjs --zerohero-v2 --zerohero-divergence"
+    if /i "%TRADING_LAB_HIDDEN%"=="1" (
+        start "" /b node.exe scripts\scanner.mjs --zerohero-v2 --zerohero-divergence 1^>^>"%LOGDIR%\scanner.log" 2^>^&1
+    ) else (
+        start "AlphaEdge Scanner" cmd.exe /k "cd /d ""%~dp0"" && node.exe scripts\scanner.mjs --zerohero-v2 --zerohero-divergence"
+    )
 )
 
 REM --- Window 4: the app UI (port 5001, opens your browser automatically) ---
@@ -96,7 +128,16 @@ if "%APP_READY%"=="1" (
     start "" "http://localhost:5001"
 ) else (
     echo  [4/4] Launching the AlphaEdge app...
-    start "AlphaEdge App" cmd /k "pushd ""%~dp0"" && npm run dev -- --port 5001"
+    if /i "%TRADING_LAB_HIDDEN%"=="1" (
+        start "" /b cmd.exe /d /c "cd /d ""%~dp0"" && npm.cmd run dev -- --port 5001 1^>^>""%LOGDIR%\app.log"" 2^>^&1"
+    ) else (
+        start "AlphaEdge App" cmd.exe /k "cd /d ""%~dp0"" && npm.cmd run dev -- --port 5001"
+    )
+    powershell.exe -NoLogo -NoProfile -Command "$deadline=(Get-Date).AddSeconds(60); do { try { $r=Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:5001/' -TimeoutSec 2; if($r.StatusCode -eq 200){Start-Process 'http://127.0.0.1:5001/'; exit 0} } catch {}; Start-Sleep -Milliseconds 500 } while((Get-Date)-lt $deadline); exit 1"
+    if errorlevel 1 (
+        echo  [ERROR] AlphaEdge app did not become ready within 60 seconds.
+        exit /b 1
+    )
 )
 
 echo.
