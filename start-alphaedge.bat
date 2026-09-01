@@ -103,7 +103,7 @@ if not errorlevel 1 (
 ) else (
     echo  [2/4] Launching the option-chain collector...
     if /i "%TRADING_LAB_HIDDEN%"=="1" (
-        start "" /b cmd.exe /d /c "cd /d ""%~dp0"" && "".chronos-venv\Scripts\python.exe"" ""strategy-lab\dhan_options_collector.py"" 1^>^>""%LOGDIR%\collector.log"" 2^>^&1"
+        powershell.exe -NoLogo -NoProfile -Command "Start-Process -FilePath '%~dp0.chronos-venv\Scripts\python.exe' -ArgumentList 'strategy-lab\dhan_options_collector.py' -WorkingDirectory '%~dp0' -WindowStyle Hidden -RedirectStandardOutput '%LOGDIR%\collector.log' -RedirectStandardError '%LOGDIR%\collector.err.log'"
     ) else (
         start "AlphaEdge Collector" cmd.exe /k "cd /d ""%~dp0"" && .chronos-venv\Scripts\python.exe strategy-lab\dhan_options_collector.py"
     )
@@ -119,7 +119,7 @@ if not errorlevel 1 (
 ) else (
     echo  [3/4] Launching the autonomous paper-trade scanner...
     if /i "%TRADING_LAB_HIDDEN%"=="1" (
-        start "" /b cmd.exe /d /c "cd /d ""%~dp0"" && node.exe scripts\scanner.mjs --zerohero-v2 --zerohero-divergence 1^>^>""%LOGDIR%\scanner.log"" 2^>^&1"
+        powershell.exe -NoLogo -NoProfile -Command "Start-Process -FilePath 'node.exe' -ArgumentList 'scripts\scanner.mjs','--zerohero-v2','--zerohero-divergence' -WorkingDirectory '%~dp0' -WindowStyle Hidden -RedirectStandardOutput '%LOGDIR%\scanner.log' -RedirectStandardError '%LOGDIR%\scanner.err.log'"
     ) else (
         start "AlphaEdge Scanner" cmd.exe /k "cd /d ""%~dp0"" && node.exe scripts\scanner.mjs --zerohero-v2 --zerohero-divergence"
     )
