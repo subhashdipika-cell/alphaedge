@@ -11,7 +11,10 @@ export default defineConfig({
     // IntelliTrade's frontend; strictPort fails loudly instead of drifting.
     port: 5001,
     strictPort: true,
-    open: true,
+    // The Windows launcher opens the browser after the app is ready. Keeping
+    // this disabled prevents Vite and start-alphaedge.bat from opening two
+    // AlphaEdge homepages during startup.
+    open: false,
   },
   build: {
     outDir: 'dist',
