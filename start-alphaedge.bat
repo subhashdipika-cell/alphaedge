@@ -132,7 +132,7 @@ if "%APP_READY%"=="1" (
 ) else (
     echo  [4/4] Launching the AlphaEdge app...
     if /i "%TRADING_LAB_HIDDEN%"=="1" (
-        start "" /b cmd.exe /d /c "cd /d ""%~dp0"" && npm.cmd run dev -- --port 5001 1^>^>""%LOGDIR%\app.log"" 2^>^&1"
+        powershell.exe -NoLogo -NoProfile -Command "Start-Process -FilePath 'npm.cmd' -ArgumentList 'run','dev','--','--port','5001' -WorkingDirectory '%~dp0' -WindowStyle Hidden -RedirectStandardOutput '%LOGDIR%\app.log' -RedirectStandardError '%LOGDIR%\app.err.log'"
     ) else (
         start "AlphaEdge App" cmd.exe /k "cd /d ""%~dp0"" && npm.cmd run dev -- --port 5001"
     )
