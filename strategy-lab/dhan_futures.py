@@ -69,6 +69,19 @@ def current_futures(today=None, refresh=False):
             "expiry":      exp.isoformat(),
             "display":     (row.get("DISPLAY_NAME") or "").strip(),
         }
+    # The scrip master is a local snapshot and can outlive every contract in
+    # it.  Without this recovery path the index collector silently returns an
+    # empty instrument map at the next monthly roll and remains broken until
+    # somebody manually runs dhan_futures.py --refresh.
+    if not refresh and len(out) < len(FUT_UNDERLYINGS):
+        try:
+            _ensure_master(refresh=True)
+            return current_futures(today=today, refresh=True)
+        except Exception:
+            # Preserve the existing fail-closed behaviour when Dhan's master
+            # endpoint is unavailable; callers will log that no instruments
+            # could be resolved instead of inventing security IDs.
+            pass
     return out
 
 

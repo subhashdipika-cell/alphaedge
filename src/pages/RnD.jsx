@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { loadHistory } from "../state/history.js";
-import { fetchReplay } from "../data/bridge.js";
+import { fetchReplay, fetchAutoPaperTrades } from "../data/bridge.js";
 import { styleMetaLearning, regimeAttribution, factorAttribution, tuneWeights, MIN_SAMPLE } from "../engines/rnd.js";
 import { getOptionPaperTrades } from "../state/paperTrades.js";
 import { getScoreWeights, setScoreWeights, DEFAULT_WEIGHTS } from "../engines/score.js";
@@ -39,9 +39,19 @@ export default function RnDPage() {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const [rp, h] = await Promise.all([fetchReplay(), loadHistory()]);
+    const [rp, h, auto] = await Promise.all([fetchReplay(), loadHistory(), fetchAutoPaperTrades()]);
     setReplay(rp?.ok ? rp : null);
-    setLive(getOptionPaperTrades(h));
+    // The headless scanner writes outside browser localStorage. Merge its
+    // resolved records into the live-paper view so autonomous outcomes feed
+    // attribution and promotion evidence even when Paper Trades was never
+    // opened in a browser session. Browser records win only when an id is not
+    // present in the scanner file; the scanner carries authoritative premium
+    // resolution for AUTO-/ZH- records.
+    const byId = new Map(getOptionPaperTrades(h).filter(t => t?.id).map(t => [t.id, t]));
+    if (auto?.ok !== false && Array.isArray(auto?.trades)) {
+      auto.trades.filter(t => t?.id).forEach(t => byId.set(t.id, t));
+    }
+    setLive([...byId.values()]);
     setLoading(false);
   }, []);
   useEffect(() => { load(); }, [load]);
