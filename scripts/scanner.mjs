@@ -57,6 +57,7 @@ const { ASSETS } = await import("../src/data/constants.js");
 const { fetchScoreInputs, fetchPremiumSeries, bridgeBaseUrl } = await import("../src/data/bridge.js");
 const { analyzeOiTrend } = await import("../src/engines/oi.js");
 const { scoreOption } = await import("../src/engines/score.js");
+const { adaptivePaperGate } = await import("../src/engines/learning.js");
 const { resolvePaperTrade, entryTsToUtc } = await import("../src/engines/resolve.js");
 const { getMoneyMgt, getRiskPolicy } = await import("../src/state/settings.js");
 const { eventProximity } = await import("../src/data/events.js");
@@ -69,6 +70,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
 const STORE_DIR = path.join(ROOT, "strategy-lab", "paper");
 const STORE = path.join(STORE_DIR, "auto_paper_trades.json");
+const HEALTH = path.join(STORE_DIR, "scanner_health.json");
+const startedAt = new Date().toISOString();
 
 // ── args ──
 const args = process.argv.slice(2);
@@ -131,6 +134,16 @@ function saveStore(store) {
   return store;
 }
 
+function saveHealth(patch = {}) {
+  try {
+    const previous = fs.existsSync(HEALTH) ? JSON.parse(fs.readFileSync(HEALTH, "utf8")) : {};
+    fs.writeFileSync(HEALTH, JSON.stringify({
+      service: "alphaedge-paper-scanner", pid: process.pid, startedAt,
+      updatedAt: new Date().toISOString(), ...previous, ...patch,
+    }, null, 2));
+  } catch (e) { console.warn("  health write failed:", e.message); }
+}
+
 // ── daily NSE trading-day gate (holidays) — cached per IST date ──
 let _tradingDay = { date: null, ok: true };
 async function isTradingDay() {
@@ -190,6 +203,12 @@ async function scanOne(store, underlying) {
   const inputs = await fetchScoreInputs(underlying, CFG.range, null);
   _lastInputs.set(underlying, inputs);
   if (!inputs.chain?.ok && !inputs.chain?.strikes?.length) return { underlying, note: "no-chain" };
+  const strategyVersion = underlying === "NIFTY50" ? "nifty-option-workflow-v1"
+    : underlying === "SENSEX" ? "sensex-option-workflow-v1" : "score-v1";
+  const adaptive = adaptivePaperGate(store.trades, strategyVersion);
+  if (!adaptive.allowed) {
+    return { underlying, note: `adaptive:${adaptive.status.toLowerCase()}` };
+  }
   const oi = inputs.oiTrend ? analyzeOiTrend(inputs.oiTrend) : { ok: false };
   const r = scoreOption({
     underlying,
@@ -233,7 +252,7 @@ async function scanOne(store, underlying) {
     maxHoldMin: r.plan.maxHoldMin, squareOff: r.plan.squareOff !== false,
     trailStop: r.plan.trailStop === true, trailArmPts: r.plan.trailArmPts, trailPts: r.plan.trailPts,
     riskReward: r.plan.rr, expiry: r.strike.expiry, strike: r.strike.strike, direction: r.direction,
-    entryQuote: "ask", strategyVersion: underlying === "NIFTY50" ? "nifty-option-workflow-v1" : underlying === "SENSEX" ? "sensex-option-workflow-v1" : "score-v1",
+    entryQuote: "ask", strategyVersion,
     summary: r.report.map(l => `${l.k}: ${l.v}`).join(" · "),
     scoreFactors: Object.fromEntries(Object.entries(r.factors).map(([k, f]) => [k, f.score01])),
     structure: r.structure ? {
@@ -264,6 +283,7 @@ async function scanOne(store, underlying) {
 // per underlying per expiry day. Max loss = the tiny premium.
 async function maybeZeroHero(store, mins) {
   if (!CFG.zeroHero) return;
+  if (!adaptivePaperGate(store.trades, "zero-hero-v1").allowed) return;
   const today = istDateStr();
   for (const u of CFG.underlyings) {
     // Already fired for this underlying's expiry today (ZH expiry === today)?
@@ -290,6 +310,7 @@ async function maybeZeroHero(store, mins) {
 
 async function maybeZeroHeroV2(store, mins) {
   if (!CFG.zeroHeroV2) return;
+  if (!adaptivePaperGate(store.trades, "zero-hero-v2").allowed) return;
   const u = "NIFTY50";
   const today = istDateStr();
   if (store.trades.some(t => t.assetId === u && t.expiry === today && t.source === "Zero-Hero-v2")) return;
@@ -311,6 +332,7 @@ async function maybeZeroHeroV2(store, mins) {
 
 async function maybeZeroHeroDivergence(store, mins) {
   if (!CFG.zeroHeroDivergence || mins < 14 * 60 || mins > 14 * 60 + 4) return;
+  if (!adaptivePaperGate(store.trades, "zero-hero-divergence-v1").allowed) return;
   const indexA = "NIFTY50", indexB = "BANKNIFTY";
   const today = istDateStr();
   if (!CFG.underlyings.includes(indexA) || !CFG.underlyings.includes(indexB)) return;
@@ -350,6 +372,7 @@ async function tick() {
 
   if (!trading) {
     saveStore(store);
+    saveHealth({ lastCycleAt: new Date().toISOString(), session: "idle", lastSummary: store.summary });
     const why = mins < ENTER_FROM ? "pre-open" : mins > STRATEGY_WINDOW_TO ? `past ${hhmm(STRATEGY_WINDOW_TO)} strategy window` : "not a trading day";
     log(`idle (${why}) · resolved ${resolved} · open ${store.summary.open}`);
     return store.summary;
@@ -365,6 +388,8 @@ async function tick() {
   await maybeZeroHeroDivergence(store, mins);
   saveStore(store);
   const s = store.summary;
+  saveHealth({ lastCycleAt: new Date().toISOString(), session: "scanning", lastSummary: s,
+    notes, lastTradeAt: store.trades.length ? new Date(Number(store.trades.at(-1).entryTs || store.trades.at(-1).timestamp)).toISOString() : null });
   log(`scan ${CFG.underlyings.map((u, i) => `${u}:${notes[i]}`).join(" · ")} | open ${s.open} · resolved ${s.resolved} (${s.winRate}% WR, ${inr(s.netRs)})`);
   return s;
 }
@@ -372,6 +397,7 @@ async function tick() {
 async function main() {
   const base = bridgeBaseUrl();
   console.log("─".repeat(72));
+  saveHealth({ status: "starting", bridge: base, config: { intervalSec: CFG.intervalMs / 1000, underlyings: CFG.underlyings } });
   console.log(" AlphaEdge — Headless Autonomous Paper-Trade Scanner");
   console.log(` bridge   ${base}`);
   console.log(` indices  ${CFG.underlyings.join(", ")}`);

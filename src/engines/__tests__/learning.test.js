@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { outcomeBucket, signalPnlR, buildSignalLearningProfile, promotionGate, promotionGatesByStrategy } from "../learning.js";
+import { outcomeBucket, signalPnlR, buildSignalLearningProfile, promotionGate, promotionGatesByStrategy, adaptivePaperGate } from "../learning.js";
 
 describe("realized outcome learning", () => {
   it("classifies from realized R rather than planned riskReward", () => {
@@ -51,5 +51,20 @@ describe("realized outcome learning", () => {
     expect(rows.find(r => r.key === "nifty-option-workflow-v1").trades).toBe(1);
     expect(rows.find(r => r.key === "sensex-option-workflow-v1").trades).toBe(1);
     expect(rows.find(r => r.key === "score-v1").trades).toBe(0);
+  });
+
+  it("keeps adaptive gate open during warmup", () => {
+    expect(adaptivePaperGate([], "score-v1").status).toBe("WARMUP");
+    expect(adaptivePaperGate([], "score-v1").allowed).toBe(true);
+  });
+
+  it("pauses a strategy with persistently poor recent paper results", () => {
+    const records = Array.from({ length: 10 }, (_, i) => ({
+      outcome: "loss", rMultiple: -1, tradeType: "Paper",
+      strategyVersion: "score-v1", timestamp: i,
+    }));
+    const r = adaptivePaperGate(records, "score-v1");
+    expect(r.status).toBe("PAUSED");
+    expect(r.allowed).toBe(false);
   });
 });

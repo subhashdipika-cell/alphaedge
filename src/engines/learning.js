@@ -25,6 +25,18 @@ export const PROMOTION_STRATEGIES = [
   { key: "zero-hero-divergence-v1", label: "Zero-Hero divergence" },
 ];
 
+// New-entry circuit breaker for the headless PAPER scanner. This is separate
+// from promotion: it needs less evidence to pause a demonstrably weak live
+// paper stream, but it never changes open-position management or authorizes
+// broker execution.
+export const ADAPTIVE_PAPER_POLICY = {
+  minResolvedTrades: 10,
+  lookbackTrades: 30,
+  minWinRatePct: 35,
+  minExpectancyR: -0.15,
+  maxDrawdownR: 6,
+};
+
 export function outcomeBucket(signalOrOutcome) {
   const outcome = typeof signalOrOutcome === "string" ? signalOrOutcome : signalOrOutcome?.outcome;
   if (typeof signalOrOutcome === "object" && (outcome === "win" || outcome === "loss")) {
@@ -68,6 +80,35 @@ export function signalPnlR(signal) {
   if (bucket === "small_loss") return -1;
   if (bucket === "big_loss") return -Math.max(3, rr);
   return 0;
+}
+
+function resolvedPaperForStrategy(records, strategyKey) {
+  return records.filter(t => isResolvedSignal(t)
+    && t.tradeType === "Paper"
+    && strategyVersionOf(t) === strategyKey)
+    .sort((a, b) => Number(a.timestamp || a.entryTs || 0) - Number(b.timestamp || b.entryTs || 0));
+}
+
+export function adaptivePaperGate(records = [], strategyKey, policy = ADAPTIVE_PAPER_POLICY) {
+  const all = resolvedPaperForStrategy(records, strategyKey);
+  const sample = all.slice(-policy.lookbackTrades);
+  const wins = sample.filter(isWinSignal).length;
+  const rValues = sample.map(signalPnlR);
+  const expectancyR = sample.length ? rValues.reduce((s, r) => s + r, 0) / sample.length : 0;
+  let equity = 0, peak = 0, maxDrawdownR = 0;
+  for (const r of rValues) { equity += r; peak = Math.max(peak, equity); maxDrawdownR = Math.max(maxDrawdownR, peak - equity); }
+  const winRatePct = sample.length ? wins / sample.length * 100 : 0;
+  const warmup = sample.length < policy.minResolvedTrades;
+  const reasons = [];
+  if (!warmup && winRatePct < policy.minWinRatePct) reasons.push(`win rate ${winRatePct.toFixed(1)}% < ${policy.minWinRatePct}%`);
+  if (!warmup && expectancyR < policy.minExpectancyR) reasons.push(`expectancy ${expectancyR.toFixed(2)}R < ${policy.minExpectancyR.toFixed(2)}R`);
+  if (!warmup && maxDrawdownR > policy.maxDrawdownR) reasons.push(`drawdown ${maxDrawdownR.toFixed(2)}R > ${policy.maxDrawdownR.toFixed(2)}R`);
+  return {
+    allowed: warmup || reasons.length === 0,
+    status: warmup ? "WARMUP" : reasons.length ? "PAUSED" : "ACTIVE",
+    strategyKey, sample: sample.length, wins, losses: sample.length - wins,
+    winRatePct, expectancyR, maxDrawdownR, reasons, policy,
+  };
 }
 
 export function buildSignalLearningProfile(records = []) {
