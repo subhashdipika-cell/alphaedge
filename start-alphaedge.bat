@@ -97,7 +97,7 @@ if "%BRIDGE_READY%"=="0" (
 
 REM --- Window 2: the option-chain collector (feeds OI + premium history).
 REM     Self-gates on the NSE session, so it idles quietly off-hours. ---
-powershell -NoProfile -Command "$p=Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match 'dhan_options_collector[.]py' }; if($p){exit 0}else{exit 1}" >nul 2>&1
+powershell -NoProfile -Command "$root=[regex]::Escape('%~dp0'); $p=Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match $root -and $_.CommandLine -match 'dhan_options_collector[.]py' }; if($p){exit 0}else{exit 1}" >nul 2>&1
 if not errorlevel 1 (
     echo  [2/4] Option-chain collector is already running.
 ) else (
@@ -113,7 +113,7 @@ REM --- Window 3: the HEADLESS autonomous paper-trade scanner.
 REM     This is what takes paper trades on its own - it scores all four indices
 REM     every ~5 min in-session and logs every TRADE-grade setup. Runs without
 REM     the browser; writes strategy-lab\paper\auto_paper_trades.json. ---
-powershell -NoProfile -Command "$p=Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match 'scripts[\\/]scanner[.]mjs' }; if($p){exit 0}else{exit 1}" >nul 2>&1
+powershell -NoProfile -Command "$root=[regex]::Escape('%~dp0'); $p=Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match $root -and $_.CommandLine -match 'scripts[\\/]scanner[.]mjs' }; if($p){exit 0}else{exit 1}" >nul 2>&1
 if not errorlevel 1 (
     echo  [3/4] Autonomous paper-trade scanner is already running.
 ) else (
