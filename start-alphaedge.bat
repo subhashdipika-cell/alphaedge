@@ -88,9 +88,12 @@ if "%BRIDGE_READY%"=="1" (
     )
 )
 
-REM --- Give the bridge a few seconds to bind :5000 before the collector and
-REM     scanner start hitting it. ---
-if "%BRIDGE_READY%"=="0" timeout /t 6 >nul
+REM --- Wait for the bridge health endpoint before starting dependants. Token
+REM     refresh and dependency setup can take longer than a fixed sleep. ---
+if "%BRIDGE_READY%"=="0" (
+    powershell.exe -NoLogo -NoProfile -Command "$deadline=(Get-Date).AddSeconds(90); do { try { $r=Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:5000/market/holiday' -TimeoutSec 2; if($r.StatusCode -eq 200){exit 0} } catch {}; Start-Sleep -Milliseconds 500 } while((Get-Date)-lt $deadline); exit 1"
+    if errorlevel 1 echo  [WARN] Dhan bridge did not become ready within 90 seconds; dependants will retry.
+)
 
 REM --- Window 2: the option-chain collector (feeds OI + premium history).
 REM     Self-gates on the NSE session, so it idles quietly off-hours. ---
@@ -100,7 +103,7 @@ if not errorlevel 1 (
 ) else (
     echo  [2/4] Launching the option-chain collector...
     if /i "%TRADING_LAB_HIDDEN%"=="1" (
-        start "" /b ".chronos-venv\Scripts\python.exe" "strategy-lab\dhan_options_collector.py" 1^>^>"%LOGDIR%\collector.log" 2^>^&1
+        start "" /b cmd.exe /d /c "cd /d ""%~dp0"" && "".chronos-venv\Scripts\python.exe"" ""strategy-lab\dhan_options_collector.py"" 1^>^>""%LOGDIR%\collector.log"" 2^>^&1"
     ) else (
         start "AlphaEdge Collector" cmd.exe /k "cd /d ""%~dp0"" && .chronos-venv\Scripts\python.exe strategy-lab\dhan_options_collector.py"
     )
@@ -116,7 +119,7 @@ if not errorlevel 1 (
 ) else (
     echo  [3/4] Launching the autonomous paper-trade scanner...
     if /i "%TRADING_LAB_HIDDEN%"=="1" (
-        start "" /b node.exe scripts\scanner.mjs --zerohero-v2 --zerohero-divergence 1^>^>"%LOGDIR%\scanner.log" 2^>^&1
+        start "" /b cmd.exe /d /c "cd /d ""%~dp0"" && node.exe scripts\scanner.mjs --zerohero-v2 --zerohero-divergence 1^>^>""%LOGDIR%\scanner.log"" 2^>^&1"
     ) else (
         start "AlphaEdge Scanner" cmd.exe /k "cd /d ""%~dp0"" && node.exe scripts\scanner.mjs --zerohero-v2 --zerohero-divergence"
     )
