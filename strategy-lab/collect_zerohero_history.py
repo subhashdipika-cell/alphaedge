@@ -98,28 +98,9 @@ def fetch_chunk(dhan, meta, interval, start, end):
 
 
 def write_daily(symbol, rows):
-    grouped = defaultdict(list)
-    for row in rows:
-        grouped[row["time"][:10]].append(row)
-    added = 0
-    for day, day_rows in grouped.items():
-        path = DATA_DIR / f"{symbol}_M{str(INTERVAL).strip()}_{day}.csv"
-        existing = set()
-        if path.exists():
-            with path.open(newline="", encoding="utf-8") as fh:
-                existing = {r.get("time") for r in csv.DictReader(fh)}
-        new_rows = [r for r in day_rows if r["time"] not in existing]
-        if not new_rows:
-            continue
-        write_header = not path.exists()
-        with path.open("a", newline="", encoding="utf-8") as fh:
-            writer = csv.writer(fh)
-            if write_header:
-                writer.writerow(HEADERS)
-            for row in sorted(new_rows, key=lambda r: r["time"]):
-                writer.writerow([row["time"], row["open"], row["high"], row["low"], row["close"], row["volume"], 0, row["volume"]])
-                added += 1
-    return added
+    from market_archive import append_verified
+    tf = "H1" if INTERVAL == 60 else f"M{INTERVAL}"
+    return append_verified(DATA_DIR, symbol, tf, rows, INDEXES[symbol])
 
 
 def collect_index_history(dhan, days, intervals):

@@ -11,12 +11,13 @@ import { netOptionPnl, exchangeFor } from '../src/engines/costs.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const dir = path.join(root, 'strategy-lab/data/options');
-const out = process.argv[2] || path.join(root, 'strategy-lab/reports', `stored-audit-${Date.now()}.json`);
+const out = process.argv.slice(2).find(arg => !arg.startsWith('--')) || path.join(root, 'strategy-lab/reports', `stored-audit-${Date.now()}.json`);
 const families = ['current', 'legacy', 'zero-hero-v1', 'zero-hero-v2', 'zero-hero-divergence'];
 const result = { generatedAt: new Date().toISOString(), assumptions: {
   mode: 'OFFLINE_RESEARCH_ONLY', slippage: 0.005, sizing: 'one option unit per leg; historical lot metadata unavailable',
+  candleProvenance: process.argv.includes('--allow-unverified') ? 'LEGACY_UNVERIFIED' : 'DHAN_INDEX_IDENTITY_RECORDED',
   charges: 'current shared cost model per one-unit order, NOT historical lot-sized portfolio P&L',
-  limitations: ['Stored index filenames may contain futures; no per-row instrument provenance.',
+  limitations: [process.argv.includes('--allow-unverified') ? 'Legacy candles may contain futures; per-row provenance is missing.' : 'Only identity-bearing INDEX candles used; missing verified sessions are not replaced with legacy files.',
     'Sparse chain snapshots cannot establish all intrabar stop/target touches.',
     'Current score uses front expiry here; live expiry rolling differs.',
     'No historical VIX, events, FII/DII or learned gate state; independent strategy tests, not scanner portfolio.',

@@ -51,6 +51,24 @@ async function fetchCandles(underlying, tf, fromDate, toDate) {
 }
 
 function localRows(underlying, tf, fromDate, toDate) {
+  if (!process.argv.includes('--allow-unverified')) {
+    const base = path.join(CANDLE_DIR, 'verified', 'INDEX', underlying);
+    if (!fs.existsSync(base)) return [];
+    const rows = [];
+    for (const sid of fs.readdirSync(base)) {
+      if (!/^\d+$/.test(sid)) continue;
+      if (sid !== ({ NIFTY50: '13', BANKNIFTY: '25', SENSEX: '51', FINNIFTY: '27' })[underlying]) continue;
+      const folder = path.join(base, sid);
+      for (const file of fs.readdirSync(folder)) {
+        const match = file.match(/_(\d{4}-\d{2}-\d{2})\.csv$/);
+        if (!file.startsWith(`${underlying}_${tf}_`) || !match || match[1] < fromDate || match[1] > toDate) continue;
+        rows.push(...readCsv(path.join(folder, file)).filter(r => r.source === 'DHAN'
+          && r.instrument_kind === 'INDEX' && r.security_id === sid && r.exchange_segment === 'IDX_I'
+          && r.timestamp_basis === 'UTC_BAR_OPEN' && Number.isFinite(Date.parse(r.collected_at))));
+      }
+    }
+    return [...new Map(rows.map(r => [r.time, r])).values()];
+  }
   const files = fs.readdirSync(CANDLE_DIR)
     .filter(f => f.startsWith(`${underlying}_${tf}_`) && f.endsWith(".csv"))
     .filter(f => { const m = f.match(/_(\d{4}-\d{2}-\d{2})\.csv$/); return m && m[1] >= fromDate && m[1] <= toDate; });
@@ -62,7 +80,7 @@ function localRows(underlying, tf, fromDate, toDate) {
 function toCandle(r) {
   const ts = new Date(String(r.time).replace(" ", "T") + "Z").getTime();
   return { ts, open: +r.open, high: +r.high, low: +r.low, close: +r.close,
-    bull: +r.close >= +r.open, vol: +(r.real_volume || r.tick_volume || 0) };
+    bull: +r.close >= +r.open, vol: +(r.volume || r.real_volume || r.tick_volume || 0) };
 }
 
 function aggregateCandles(candles, minutes) {

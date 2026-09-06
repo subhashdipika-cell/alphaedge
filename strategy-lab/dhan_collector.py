@@ -52,12 +52,7 @@ DATA_DIR.mkdir(exist_ok=True)
 # We trade the tradable MONTHLY INDEX FUTURES (FUTIDX), not the untradable index
 # spot. dhan_futures.current_futures() resolves the nearest-expiry contract per
 # underlying from Dhan's scrip master and AUTO-ROLLS to next month after expiry.
-try:
-    from dhan_futures import current_futures
-    INSTRUMENTS = current_futures()     # {NIFTY50: {security_id, segment:NSE_FNO, instrument:FUTIDX, lot, expiry, display}, ...}
-except Exception as _e:
-    INSTRUMENTS = {}
-    print(f"WARNING: could not resolve index futures: {_e}")
+from market_archive import INDEX_INSTRUMENTS, append_verified
 
 # Dhan intraday interval (minutes, int per the SDK) -> our timeframe label.
 INTRADAY_TFS = {
@@ -136,40 +131,6 @@ def candles_from_response(resp: dict) -> list[dict]:
     return rows
 
 
-def csv_path(symbol: str, tf: str) -> Path:
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    return DATA_DIR / f"{symbol}_{tf}_{today}.csv"
-
-
-def load_existing_times(path: Path) -> set:
-    if not path.exists():
-        return set()
-    with open(path, newline="") as f:
-        return {row["time"] for row in csv.DictReader(f)}
-
-
-def append_rows(symbol: str, tf: str, rows: list[dict]) -> int:
-    """Append new candles to the daily CSV in the MT5 collector's format."""
-    if not rows:
-        return 0
-    path = csv_path(symbol, tf)
-    existing = load_existing_times(path)
-    write_header = not path.exists()
-    new = 0
-    with open(path, "a", newline="") as f:
-        writer = csv.writer(f)
-        if write_header:
-            writer.writerow(["time", "open", "high", "low", "close",
-                             "tick_volume", "spread", "real_volume"])
-        for r in rows:
-            if r["time"] in existing:
-                continue
-            # spread is unknown from Dhan -> 0; real_volume mirrors volume.
-            writer.writerow([r["time"], r["open"], r["high"], r["low"],
-                             r["close"], r["volume"], 0, r["volume"]])
-            existing.add(r["time"])
-            new += 1
-    return new
 
 
 # ── Fetchers ─────────────────────────────────────────────────────────────────
@@ -212,11 +173,16 @@ def main():
 
     dhan = build_client()
 
-    chosen = INSTRUMENTS
+    chosen = dict(INDEX_INSTRUMENTS)
+    try:
+        from dhan_futures import current_futures
+        chosen.update({name + ':FUTIDX': meta for name, meta in current_futures().items()})
+    except Exception as exc:
+        log(f"Futures resolution unavailable; continuing index collection: {type(exc).__name__}")
     if args.only:
         want = {s.strip().upper() for s in args.only.split(",") if s.strip()}
-        chosen = {k: v for k, v in INSTRUMENTS.items() if k.upper() in want}
-        missing = want - {k.upper() for k in INSTRUMENTS}
+        missing = want - {k.split(':')[0].upper() for k in chosen}
+        chosen = {k: v for k, v in chosen.items() if k.split(':')[0].upper() in want}
         for m in missing:
             log(f"WARNING: '{m}' not in INSTRUMENTS — add it via dhan_lookup.py first")
 
@@ -239,13 +205,13 @@ def main():
     for name, meta in chosen.items():
         if args.daily:
             rows = fetch_daily(dhan, meta, from_date, to_date)
-            n = append_rows(name, "D1", rows)
+            n = append_verified(DATA_DIR, name.split(':')[0], "D1", rows, meta)
             log(f"  {name} D1: +{n} new bars ({len(rows)} fetched)")
             time.sleep(0.6)  # be gentle on rate limits
         else:
             for interval, tf in INTRADAY_TFS.items():
                 rows = fetch_intraday(dhan, meta, interval, from_date, to_date)
-                n = append_rows(name, tf, rows)
+                n = append_verified(DATA_DIR, name.split(':')[0], tf, rows, meta)
                 log(f"  {name} {tf}: +{n} new bars ({len(rows)} fetched)")
                 time.sleep(0.6)
 

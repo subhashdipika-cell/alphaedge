@@ -669,6 +669,8 @@ def fetch_lot_sizes():
 # ─── INDIA VIX ─────────────────────────────────────────────────────────────────
 # Live India VIX (Dhan IDX_I security 21) with a collected-ATM-IV percentile
 # proxy as fallback so the score engine can still reason about vol off-hours.
+from audit_results import stored_audit
+
 def rd_replay():
     """Serve the latest options-premium score replay (scripts/replay.mjs output)
     for the R&D page. Read-only — the browser can't touch strategy-lab/results."""
@@ -788,6 +790,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, fetch_lot_sizes())
         elif parsed.path.startswith("/dhan/vix"):
             self._send(200, dhan_vix())
+        elif parsed.path == "/rd/stored-audit":
+            self._send(200, stored_audit())
         elif parsed.path.startswith("/rd/replay"):
             self._send(200, rd_replay())
         elif parsed.path.startswith("/paper/auto"):
