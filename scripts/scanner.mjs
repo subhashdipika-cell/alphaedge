@@ -54,7 +54,8 @@ if (process.env.BRIDGE_URL) {
 }
 
 const { ASSETS } = await import("../src/data/constants.js");
-const { fetchScoreInputs, fetchPremiumSeries, bridgeBaseUrl } = await import("../src/data/bridge.js");
+const { fetchScoreInputs, fetchPremiumSeries, fetchOiTrend, bridgeBaseUrl } = await import("../src/data/bridge.js");
+const { evaluateGuardrails } = await import("../src/engines/guardrails.js");
 const { analyzeOiTrend } = await import("../src/engines/oi.js");
 const { scoreOption } = await import("../src/engines/score.js");
 const { adaptivePaperGate } = await import("../src/engines/learning.js");
@@ -63,7 +64,7 @@ const { getMoneyMgt, getRiskPolicy } = await import("../src/state/settings.js");
 const { eventProximity } = await import("../src/data/events.js");
 const { sendPaperOpenAlert, sendPaperCloseAlert, tgConfigured } = await import("../src/data/telegram.js");
 const { zeroHeroPick, zeroHeroRecords, zeroHeroV2Pick, zeroHeroV2Records,
-  zeroHeroDivergencePick, zeroHeroDivergenceRecord } = await import("../src/engines/zerohero.js");
+  zeroHeroDivergencePick, zeroHeroDivergenceRecord, zeroHeroPackageGate } = await import("../src/engines/zerohero.js");
 const { fetchOptionChain, getLotSize } = await import("../src/data/bridge.js");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -282,6 +283,17 @@ async function scanOne(store, underlying) {
 // chain (bypasses the expiry roll on purpose), as two 1-lot legs: A targets 2×
 // (sell half at double), B rides with a trailing stop arming at 2×. One shot
 // per underlying per expiry day. Max loss = the tiny premium.
+function allowExpiryPackage(store, records) {
+  const guard = evaluateGuardrails(store.trades, null, records[0]?.assetId);
+  const risk = zeroHeroPackageGate({ records, history: store.trades, capital: CFG.capital, riskPct: CFG.risk,
+    maxDailyLossPct: getRiskPolicy().maxDailyLossPct });
+  if (guard.blocked || !risk.allowed) {
+    log(`ZERO-HERO risk veto: ${guard.blocked ? JSON.stringify(guard.violations) : risk.reason}`);
+    return false;
+  }
+  return true;
+}
+
 async function maybeZeroHero(store, mins) {
   if (!CFG.zeroHero) return;
   if (!adaptivePaperGate(store.trades, "zero-hero-v1").allowed) return;
@@ -302,8 +314,9 @@ async function maybeZeroHero(store, mins) {
         continue;
       }
       const recs = zeroHeroRecords({ underlying: u, pick, lotSize: getLotSize(u) });
+      if (!allowExpiryPackage(store, recs)) continue;
       store.trades.push(...recs);
-      log(`ZERO-HERO OPENED ${u} ${pick.leg.strike}${pick.direction} @ ₹${pick.leg.ltp} ×2 lots (0-DTE lottery) · half off at ₹${(pick.leg.ltp * 2).toFixed(2)}, runner trails`);
+      log(`ZERO-HERO OPENED ${u} ${pick.leg.strike}${pick.direction} @ ₹${recs[0].entry} ASK ×2 lots (0-DTE lottery) · half off at ₹${recs[0].tgtPremium}, runner trails`);
       sendPaperOpenAlert({ ...recs[0], lots: 2, id: recs[0].id.replace(/-A$/, "") });
     } catch (e) { log(`ZERO-HERO ${u}: error — ${e.message}`); }
   }
@@ -318,13 +331,17 @@ async function maybeZeroHeroV2(store, mins) {
   try {
     const chain = await fetchOptionChain(u, CFG.range, null);
     const inputs = _lastInputs.get(u) || await fetchScoreInputs(u, CFG.range, null);
-    const oi = inputs.oiTrend ? analyzeOiTrend(inputs.oiTrend) : { ok: false };
+    const expiryOi = inputs.oiTrend?.expiry === chain?.expiry
+      ? inputs.oiTrend : await fetchOiTrend(u, 5, chain?.expiry);
+    if (!chain?.expiry || expiryOi?.expiry !== chain.expiry) { log("ZERO-HERO-V2: missing matching-expiry premium history"); return; }
+    const oi = expiryOi ? analyzeOiTrend(expiryOi) : { ok: false };
     const pick = zeroHeroV2Pick({ chain, oi, candles5m: inputs.candles5m, candles15m: inputs.candles15m, istMin: mins });
     if (!pick.ok) {
       if (!/window|expiry day/.test(pick.reason)) log(`ZERO-HERO-V2 ${u}: skip — ${pick.reason}`);
       return;
     }
     const recs = zeroHeroV2Records({ underlying: u, pick, lotSize: getLotSize(u) });
+    if (!allowExpiryPackage(store, recs)) return;
     store.trades.push(...recs);
     log(`ZERO-HERO-V2 OPENED ${u} ${pick.leg.strike}${pick.direction} @ ₹${recs[0].entry} ASK · NIFTY ${pick.context.regime} · premium breakout`);
     sendPaperOpenAlert({ ...recs[0], lots: 2, id: recs[0].id.replace(/-A$/, "") });
@@ -356,6 +373,7 @@ async function maybeZeroHeroDivergence(store, mins) {
       return;
     }
     const record = zeroHeroDivergenceRecord({ pick, lotSize: getLotSize(indexB) });
+    if (!allowExpiryPackage(store, [record])) return;
     store.trades.push(record);
     log(`ZERO-HERO-DIVERGENCE OPENED ${indexA}→${indexB} ${pick.leg.strike}${pick.direction} @ ₹${pick.leg.entry} ASK · SL ₹${pick.leg.stopPremium} TGT ₹${pick.leg.targetPremium} (10R)`);
     sendPaperOpenAlert(record);

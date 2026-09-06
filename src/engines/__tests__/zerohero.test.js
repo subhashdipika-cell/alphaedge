@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { zeroHeroPick, zeroHeroRecords, zeroHeroV2Pick, zeroHeroV2Records,
-  zeroHeroDivergencePick, zeroHeroDivergenceRecord } from "../zerohero.js";
+  zeroHeroDivergencePick, zeroHeroDivergenceRecord, zeroHeroPackageGate } from "../zerohero.js";
 
 const IN_WINDOW = 14 * 60;         // 14:00 IST
 const upDay = Array.from({ length: 40 }, (_, i) => ({ close: 24100 + i * 6 }));
@@ -9,8 +9,8 @@ const dnDay = Array.from({ length: 40 }, (_, i) => ({ close: 24300 - i * 6 }));
 function chain({ expiryToday = true } = {}) {
   const mk = (strike, ceLtp, peLtp) => ({
     strike,
-    ce: { ltp: ceLtp, oi: 50000, delta: 0.1 },
-    pe: { ltp: peLtp, oi: 50000, delta: -0.1 },
+    ce: { ltp: ceLtp, ask: ceLtp, bid: ceLtp - 0.05, volume: 10000, oi: 50000, delta: 0.1 },
+    pe: { ltp: peLtp, ask: peLtp, bid: peLtp - 0.05, volume: 10000, oi: 50000, delta: -0.1 },
   });
   return {
     ok: true, underlying: "NIFTY50", under_ltp: 24300, expiry: "2026-07-21",
@@ -38,6 +38,15 @@ const v2Candles = Array.from({ length: 80 }, (_, i) => {
 });
 
 describe("zeroHeroPick", () => {
+  it("rejects missing, crossed and wide quotes, and buys at ask", () => {
+    for (const patch of [{ bid: 0 }, { bid: 5 }, { bid: 1 }, { volume: 0 }]) {
+      const c = chain(); Object.assign(c.strikes.at(-1).pe, patch);
+      expect(zeroHeroPick({ chain: c, candles5m: upDay, istMin: IN_WINDOW }).ok).toBe(false);
+    }
+    const c = chain(); c.strikes.at(-1).pe.ask = 4.2;
+    const pick = zeroHeroPick({ chain: c, candles5m: upDay, istMin: IN_WINDOW });
+    expect(zeroHeroRecords({ underlying: 'NIFTY50', pick, lotSize: 65 })[0].optionPremium).toBe(4.2);
+  });
   it("FADES an up-trending expiry day (buys the PE) — spikes are reversal-driven", () => {
     const r = zeroHeroPick({ chain: chain(), candles5m: upDay, istMin: IN_WINDOW });
     expect(r.ok).toBe(true);
@@ -66,6 +75,24 @@ describe("zeroHeroPick", () => {
     const r = zeroHeroPick({ chain: c, candles5m: upDay, istMin: IN_WINDOW });
     expect(r.ok).toBe(false);
     expect(r.reason).toMatch(/no ₹/);
+  });
+});
+
+describe('expiry package risk', () => {
+  const record = { assetId: 'NIFTY50', optionPremium: 4, tgtPremium: 8, lots: 1, lotSize: 65 };
+  it('rejects stacking and risk beyond full debit budget', () => {
+    expect(zeroHeroPackageGate({ records: [record], history: [{ assetId: 'NIFTY50', outcome: 'pending' }], capital: 400000, riskPct: 1 }).allowed).toBe(false);
+    expect(zeroHeroPackageGate({ records: [record, record], capital: 10000, riskPct: 1 }).allowed).toBe(false);
+    expect(zeroHeroPackageGate({ records: [record, record], capital: 400000, riskPct: 1 }).allowed).toBe(true);
+  });
+  it('rejects a nominal target that cannot pay costs', () => {
+    expect(zeroHeroPackageGate({ records: [{ ...record, tgtPremium: 4.1 }], capital: 400000, riskPct: 1 }).allowed).toBe(false);
+  });
+  it('honors the daily loss limit without carrying it into another IST session', () => {
+    const now = Date.parse('2026-09-01T08:30:00Z');
+    const args = { records: [record], capital: 400000, riskPct: 1, maxDailyLossPct: 3, now };
+    expect(zeroHeroPackageGate({ ...args, history: [{ outcome: 'loss', pnlRs: -12000, resolvedAt: now }] }).allowed).toBe(false);
+    expect(zeroHeroPackageGate({ ...args, history: [{ outcome: 'loss', pnlRs: -12000, resolvedAt: now - 86400000 }] }).allowed).toBe(true);
   });
 });
 

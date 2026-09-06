@@ -153,7 +153,8 @@ echo     3^) Scanner       - AUTONOMOUS paper trader (no broker orders)
 echo     4^) App           - the UI on http://localhost:5001 (browser opens)
 echo.
 echo   The Scanner takes paper trades on its own during market hours
-echo   (09:20-15:00 IST entries, 15:12 square-off). It keeps running even
+echo   (normal scanner 09:20-13:30, tighter strategy windows apply;
+echo    expiry strategies have separate windows; 15:12 square-off). It keeps running even
 echo   if you close the browser - watch its window, or the app's
 echo   Paper Trades page -^> "Autonomous Scanner" section.
 echo.

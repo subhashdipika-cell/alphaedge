@@ -35,6 +35,7 @@ const BRIDGE = process.env.BRIDGE_URL || "http://127.0.0.1:5000";
 // Dhan intraday historical is size-limited per request, so callers fetch short
 // windows. `time` comes back in Unix SECONDS.
 async function fetchCandles(underlying, tf, fromDate, toDate) {
+  if (process.argv.includes("--local-only")) return localCandles(underlying, tf, fromDate, toDate);
   try {
     const r = await fetch(`${BRIDGE}/dhan/historical`, {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -85,7 +86,7 @@ function localCandles(underlying, tf, fromDate, toDate) {
   const toTs = new Date(`${toDate}T23:59:59Z`).getTime();
   return result.filter(c => c.ts >= fromTs && c.ts <= toTs);
 }
-const sliceTo = (arr, ts) => arr.filter(c => c.ts <= ts);
+const sliceTo = (arr, ts, minutes) => arr.filter(c => c.ts + minutes * 60000 <= ts);
 const ymd = (d) => d.toISOString().slice(0, 10);
 
 // Per-(underlying, date) candle history: a ~14-day window ENDING on the replay
@@ -143,7 +144,7 @@ function readCsv(fp) {
 function snapshots(rows) {
   const byTs = new Map();
   for (const r of rows) { if (!byTs.has(r.time)) byTs.set(r.time, []); byTs.get(r.time).push(r); }
-  return [...byTs.entries()].map(([time, legs]) => ({ time, hhmm: utcToIstHHMM(time), legs }));
+  return [...byTs.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([time, legs]) => ({ time, hhmm: utcToIstHHMM(time), legs }));
 }
 
 // Build the /dhan/optionchain-shaped object at a snapshot.
@@ -244,7 +245,7 @@ function replayDay({ file, underlying, date }, candleHist) {
 
     // Manage an open trade: resolve against remaining premium series.
     if (openTrade) {
-      const ser = premiumSeries(snaps, openTrade.strike, openTrade.direction, openTrade.entryHHMM);
+      const ser = premiumSeries(snaps.slice(0, i + 1), openTrade.strike, openTrade.direction, openTrade.entryHHMM);
       const res = resolvePaperTrade({ ...openTrade, entryTs: openTrade.entryTs }, ser);
       if (res) { trades.push({ ...openTrade, ...res, date }); openTrade = null; }
       else continue;   // still open — don't stack positions
@@ -257,7 +258,7 @@ function replayDay({ file, underlying, date }, candleHist) {
 
     // Real underlying candles sliced to this replay instant (proper OHLC).
     const replayTs = new Date(snaps[i].time.replace(" ", "T") + "Z").getTime();
-    const c5 = sliceTo(candleHist.c5, replayTs), c15 = sliceTo(candleHist.c15, replayTs), c1h = sliceTo(candleHist.c1h, replayTs);
+    const c5 = sliceTo(candleHist.c5, replayTs, 5), c15 = sliceTo(candleHist.c15, replayTs, 15), c1h = sliceTo(candleHist.c1h, replayTs, 60);
     const r = scoreOption({
       underlying, candles5m: c5, candles15m: c15, candles1H: c1h,
       chain, oi, vix: null, history: [], events: {}, mm: { capital: CFG.capital, rr: 2 }, riskPct: CFG.risk,
@@ -369,4 +370,6 @@ async function main() {
   if (!all.length) console.log(`No fills. Rejection diagnostics: ${JSON.stringify(summary.diagnostics.allGates)}`);
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+export { readCsv, snapshots, chainAt, oitrendUpto, localCandles, sliceTo, hhmmToMin };
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url))
+  main().catch(e => { console.error(e); process.exit(1); });

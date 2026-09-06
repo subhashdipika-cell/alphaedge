@@ -141,12 +141,12 @@ def _ist_day(ts=None):
 # ─── INDIAN MARKET CALENDAR + INTRADAY SQUARE-OFF ────────────────────────────
 # NSE cash session (verified from Dhan M1 data): 09:15–15:30 IST, Mon–Fri.
 # Rule: every Indian intraday position is CLOSED before 15:20 IST — new
-# entries are blocked from 15:05, open Indian positions flattened at 15:15.
+# entries are blocked from 15:05, open Indian positions flattened at 15:12.
 # Holidays are refreshed once per IST day from Dhan's public holiday page
 # (only the TRADING-holiday table — clearing holidays are normal trading
 # days), cached to disk, with a hardcoded 2026 fallback list.
 IN_SQOFF_BLOCK_MIN   = 15 * 60 + 5    # 15:05 IST — no new Indian entries
-IN_SQOFF_FLATTEN_MIN = 15 * 60 + 15   # 15:15 IST — flatten Indian positions
+IN_SQOFF_FLATTEN_MIN = 15 * 60 + 12   # 15:12 IST — flatten Indian positions
 DHAN_HOLIDAY_URL = "https://dhan.co/market-holiday/"
 HOLIDAY_CACHE_FILE = pathlib.Path(__file__).parent / "nse_holidays.json"
 NSE_HOLIDAYS_2026_FALLBACK = [
@@ -799,7 +799,7 @@ class Handler(BaseHTTPRequestHandler):
             hols = indian_holidays()
             self._send(200, {"ok": True, "today": today, "isHoliday": today in set(hols),
                              "tradingDay": is_indian_trading_day(),
-                             "squareOff": {"blockFrom": "15:05", "flattenAt": "15:15", "close": "15:30"},
+                             "squareOff": {"blockFrom": "15:05", "flattenAt": "15:12", "close": "15:30"},
                              "holidays": hols})
         elif parsed.path == "/wiki/index":
             self._send(200, get_wiki_index())

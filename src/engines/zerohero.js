@@ -1,7 +1,7 @@
 // ─── ZERO HERO — expiry-day lottery scalp (paper experiment) ──────────────────
 // On expiry day between 14:00–14:45 IST, buy 2 lots of a far-OTM option priced
-// ₹3–5 on the FADE (counter-trend) side. When premium doubles, sell half (the
-// trade is now free) and ride the rest into the close. Max loss = the premium.
+// ₹3–5 on the FADE (counter-trend) side. When premium doubles, sell half and
+// ride the rest into the close. Costs mean the remaining trade is NOT free.
 //
 // This is a deliberate exception to the main stack's rules: it WANTS the 0-DTE
 // chain (no expiry roll) and premiums far below the ₹40 floor (it IS the
@@ -14,13 +14,10 @@
 //   leg B: no target, trailing stop arming at 2× (the runner)
 
 import { analyzeNiftyIndexContext, analyzeSelectedOption } from "./niftyMomentum.js";
+import { netOptionPnl, exchangeFor } from "./costs.js";
 
-// Window + side are DATA-DRIVEN (strategy-lab/zh_window_scan.py over 9 expiry
-// days, ~317 tickets): 14:00–14:45 was the only EV-positive zone (+0.15×/ticket,
-// 38.9% doubled, 11% hit 5×) and the spikes sat on the COUNTER-trend side —
-// expiry-afternoon far-OTM explosions are reversal/short-covering squeezes, so
-// fading the day's trend beat riding it in every afternoon window. Re-run the
-// scan as more expiry days accumulate; n is still small.
+// Legacy window/side came from a small in-sample window scan, not a validated
+// edge. September's stored-data audit did not establish net profitability.
 export const ZH_DEFAULTS = {
   minPrem: 3,            // ₹ — candidate premium band
   maxPrem: 5,
@@ -28,6 +25,7 @@ export const ZH_DEFAULTS = {
   enterFromMin: 14 * 60,        // 14:00 IST (13:45 entries sat in a −0.32× EV bucket)
   enterToMin: 14 * 60 + 45,     // 14:45 IST
   minOi: 5000,           // liquidity floor for the chosen strike
+  maxSpreadPct: 0.08,    // execution guard, not a fitted profitability parameter
 };
 
 // Decide the lottery leg for one underlying.
@@ -39,13 +37,12 @@ export function zeroHeroPick({ chain, candles5m, istMin, cfg = ZH_DEFAULTS }) {
   if (!chain?.ok || !chain.strikes?.length) return { ok: false, reason: "no chain" };
   if (!chain.isExpiryToday) return { ok: false, reason: "not expiry day" };
   if (istMin < cfg.enterFromMin || istMin > cfg.enterToMin)
-    return { ok: false, reason: "outside 13:45–14:45 window" };
+    return { ok: false, reason: "outside 14:00–14:45 window" };
   if (!Array.isArray(candles5m) || candles5m.length < 30)
     return { ok: false, reason: "insufficient candles" };
 
-  // Direction = FADE the day's trend (counter-trend). Empirical: expiry-afternoon
-  // far-OTM spikes are reversal/squeeze-driven — the fade side doubled 38.9% vs
-  // the trend side's 17.4% in the 14:00 window (see zh_window_scan.py).
+  // Preserve the counter-trend research hypothesis; do not confuse it with
+  // evidence that reversals must occur. V2 separately tests trend confirmation.
   const closes = candles5m.map(c => c.close);
   const k = 2 / 21;
   let ema = closes[0];
@@ -59,14 +56,16 @@ export function zeroHeroPick({ chain, candles5m, istMin, cfg = ZH_DEFAULTS }) {
   const spot = chain.under_ltp || 0;
   const cands = chain.strikes
     .map(s => ({ strike: s.strike, leg: s[side] || {} }))
-    .filter(x => x.leg.ltp >= cfg.minPrem && x.leg.ltp <= cfg.maxPrem && (x.leg.oi || 0) >= cfg.minOi)
+    .filter(x => x.leg.ask >= cfg.minPrem && x.leg.ask <= cfg.maxPrem && (x.leg.oi || 0) >= cfg.minOi
+      && x.leg.volume > 0 && x.leg.bid > 0 && x.leg.ask >= x.leg.bid
+      && (x.leg.ask - x.leg.bid) / x.leg.ask <= (cfg.maxSpreadPct ?? 0.08))
     .sort((a, b) => Math.abs(a.strike - spot) - Math.abs(b.strike - spot));
   if (!cands.length) return { ok: false, reason: `no ₹${cfg.minPrem}–${cfg.maxPrem} strike with OI ≥ ${cfg.minOi}` };
 
   const pick = cands[0];
   return {
     ok: true, direction, spot,
-    leg: { strike: pick.strike, ltp: pick.leg.ltp, oi: pick.leg.oi || 0,
+    leg: { strike: pick.strike, ltp: pick.leg.ltp, ask: pick.leg.ask, bid: pick.leg.bid, oi: pick.leg.oi || 0,
            delta: pick.leg.delta || 0, expiry: chain.expiry },
   };
 }
@@ -74,7 +73,8 @@ export function zeroHeroPick({ chain, candles5m, istMin, cfg = ZH_DEFAULTS }) {
 // Build the two 1-lot paper-trade records for a pick (scanner shape).
 // lotSize comes from the caller (getLotSize is app/data-layer territory).
 export function zeroHeroRecords({ underlying, pick, lotSize, now = Date.now() }) {
-  const entry = pick.leg.ltp;
+  const entry = Number(pick.leg.ask);
+  if (!(entry > 0)) throw new Error("Zero-Hero requires an executable ask");
   const base = {
     timestamp: now, entryTs: now,
     asset: underlying, assetId: underlying, timeframe: "options",
@@ -87,6 +87,7 @@ export function zeroHeroRecords({ underlying, pick, lotSize, now = Date.now() })
     expiry: pick.leg.expiry, strike: pick.leg.strike, direction: pick.direction,
     regime: "EXPIRY", style: "ZERO_HERO", strategyVersion: "zero-hero-v1",
     outcome: "pending", source: "Zero-Hero", tradeType: "Paper",
+    executionRevision: "quote-risk-2026-09-06",
   };
   return [
     { ...base, id: `ZH-${underlying}-${now}-A`,
@@ -117,9 +118,9 @@ export function zeroHeroV2Pick({ chain, oi, candles5m, candles15m, istMin, cfg =
   const side = context.direction === "CE" ? "ce" : "pe";
   const cands = chain.strikes.map(s => {
     const leg = s[side] || {};
-    const spreadPct = leg.ltp > 0 && leg.ask ? Math.abs((leg.ask - (leg.bid || leg.ask)) / leg.ltp) : 1;
+    const spreadPct = leg.bid > 0 && leg.ask >= leg.bid ? (leg.ask - leg.bid) / leg.ask : Infinity;
     return { strike: s.strike, leg, spreadPct };
-  }).filter(x => x.leg.ltp >= cfg.minPrem && x.leg.ltp <= cfg.maxPrem
+  }).filter(x => x.leg.ask >= cfg.minPrem && x.leg.ask <= cfg.maxPrem
     && (x.leg.oi || 0) >= cfg.minOi && (x.leg.volume || 0) > 0
     && Math.abs(x.leg.delta || 0) >= cfg.minDelta && Math.abs(x.leg.delta || 0) <= cfg.maxDelta
     && x.spreadPct <= cfg.maxSpreadPct)
@@ -134,6 +135,41 @@ export function zeroHeroV2Pick({ chain, oi, candles5m, candles15m, istMin, cfg =
       leg: { ...candidate.leg, strike: candidate.strike, spreadPct: candidate.spreadPct, expiry: chain.expiry } };
   }
   return { ok: false, reason: "no selected option premium breakout", context };
+}
+
+// Bound expiry risk by the FULL debit plus costs: a stop cannot guarantee its
+// fill during a gamma spike. Keep legacy strategy IDs so old loss vetoes persist.
+export function zeroHeroPackageGate({ records, history = [], capital, riskPct, maxDailyLossPct = 3, now = Date.now() }) {
+  if (!records?.length || !(capital > 0) || !(riskPct > 0)) return { allowed: false, reason: "invalid expiry risk budget" };
+  const underlying = records[0].assetId;
+  if (history.some(t => t.assetId === underlying && (!t.outcome || t.outcome === "pending")))
+    return { allowed: false, reason: "existing position in target index" };
+  let fullLoss = 0;
+  for (const r of records) {
+    const entry = Number(r.optionPremium), qty = Number(r.lots) * Number(r.lotSize);
+    if (!(entry > 0) || !(qty > 0)) return { allowed: false, reason: "invalid premium or lot size" };
+    const exchange = exchangeFor(r.assetId);
+    fullLoss += -netOptionPnl({ entryPremium: entry, exitPremium: 0, qty, exchange }).netRs;
+    if (r.tgtPremium > 0 && netOptionPnl({ entryPremium: entry, exitPremium: r.tgtPremium * 0.995, qty, exchange }).netRs <= 0)
+      return { allowed: false, reason: "target does not cover estimated execution costs" };
+  }
+  const day = ts => new Date(Number(ts) + 330 * 60000).toISOString().slice(0, 10);
+  const today = day(now);
+  const realizedToday = history.filter(t => ['win', 'loss'].includes(t.outcome)
+    && Number(t.closedAt || t.resolvedAt || t.timestamp) > 0
+    && day(t.closedAt || t.resolvedAt || t.timestamp) === today)
+    .reduce((sum, t) => sum + (Number(t.pnlRs) || 0), 0);
+  const dailyBudget = capital * maxDailyLossPct / 100;
+  if (!(dailyBudget > 0) || realizedToday <= -dailyBudget)
+    return { allowed: false, reason: "daily realized loss limit reached" };
+  // Reserve full debit on other pending options; do not spend the same budget twice.
+  const reserved = history.filter(t => !t.outcome || t.outcome === 'pending').reduce((sum, t) =>
+    sum + Math.max(0, Number(t.optionPremium) || 0) * Math.max(0, Number(t.lots) || 0) * Math.max(0, Number(t.lotSize) || 0), 0);
+  if (fullLoss + reserved > dailyBudget + Math.min(0, realizedToday))
+    return { allowed: false, reason: "insufficient remaining daily risk budget", fullLoss };
+  return fullLoss <= capital * riskPct / 100
+    ? { allowed: true, fullLoss }
+    : { allowed: false, reason: "full expiry debit exceeds per-trade risk budget", fullLoss };
 }
 
 export function zeroHeroV2Records({ underlying, pick, lotSize, now = Date.now() }) {
