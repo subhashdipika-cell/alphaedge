@@ -5626,8 +5626,8 @@ export default function AlphaEdge() {
             </span>
           )}
 
-          <span style={{fontSize:9,color:"#22c55e",background:"#052e16",padding:"3px 8px",
-            borderRadius:5,border:"0.5px solid #22c55e30"}}>● MARKETS OPEN</span>
+          <span style={{fontSize:9,color:marketOpen?"#22c55e":"#f59e0b",background:marketOpen?"#052e16":"#1c1300",padding:"3px 8px",
+            borderRadius:5,border:"0.5px solid #1e3a5a"}}>{marketOpen ? "● MARKETS OPEN" : "○ MARKET CLOSED"}</span>
 
           {/* Price source indicator */}
           <span style={{fontSize:9,padding:"3px 8px",borderRadius:5,fontFamily:"monospace",
@@ -5635,7 +5635,7 @@ export default function AlphaEdge() {
             background: priceSource==="live"?"#052e16": priceSource==="simulated"?"#1c1300":"#0a1628",
             border:`0.5px solid ${priceSource==="live"?"#22c55e30": priceSource==="simulated"?"#f59e0b30":"#1e3a5a"}`}}>
             {priceSource==="live"
-              ? `📡 Live · ${prices?.NIFTY50?.source || prices?.BANKNIFTY?.source || prices?.SENSEX?.source || "…"}`
+              ? `📡 ${marketOpen ? "Live" : "Last close"} · ${prices?.NIFTY50?.source || prices?.BANKNIFTY?.source || prices?.SENSEX?.source || "…"}`
               : priceSource==="simulated"?"⚠ Simulated":"⟳ Fetching..."}
           </span>
 
