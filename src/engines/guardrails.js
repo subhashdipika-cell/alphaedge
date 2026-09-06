@@ -93,7 +93,11 @@ export function evaluateGuardrails(history = [], signal = null, asset = null) {
   const indian = isIndianInstrument(asset || signal?.asset || signal?.symbol);
 
   const todays = history.filter(s => s && s.timestamp && istDayKey(s.timestamp) === todayKey);
-  const resolved = history.filter(isResolvedSignal).sort((a, b) => b.timestamp - a.timestamp);
+  // A session stop resets at the IST date boundary. Prior-day losses must not
+  // prevent the first eligible setup of every subsequent session forever.
+  const resolved = history.filter(s => isResolvedSignal(s)
+    && istDayKey(s.closedAt || s.resolvedAt || s.timestamp) === todayKey)
+    .sort((a, b) => Number(b.closedAt || b.resolvedAt || b.timestamp) - Number(a.closedAt || a.resolvedAt || a.timestamp));
   let consec = 0;
   for (const s of resolved) { if (isLossSignal(s)) consec++; else break; }
   const lastLoss = resolved.find(isLossSignal);

@@ -37,6 +37,9 @@ except ImportError:
     DhanContext = _dhanhq = None  # /dhan/* endpoints return a friendly error
 
 import oi_metrics  # Trending-OI + premium series from the collected chain CSVs
+import sys
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "strategy-lab"))
+from dhan_pacing import paced_call
 
 # Optional Chronos inference. The bridge remains fully usable without the
 # package; /ai/timing returns an explicit unavailable response instead.
@@ -313,7 +316,7 @@ def dhan_optionchain(req):
     try:
         dhan = _dhanhq(DhanContext(client, token))
         sid = int(meta["security_id"]); seg = meta["segment"]
-        el = dhan.expiry_list(sid, seg)
+        el = paced_call(dhan.expiry_list, sid, seg)
         eld = (el.get("data") or {}).get("data") or el.get("data") or []
         if isinstance(eld, dict):
             eld = eld.get("data") or []
@@ -328,7 +331,7 @@ def dhan_optionchain(req):
         else:
             expiry = next((e for e in expiries if e >= today), expiries[0])
         time.sleep(0.3)
-        oc = dhan.option_chain(sid, seg, expiry)
+        oc = paced_call(dhan.option_chain, sid, seg, expiry)
         d = oc.get("data", oc)
         if isinstance(d, dict) and isinstance(d.get("data"), dict):
             d = d["data"]
@@ -836,6 +839,7 @@ class Handler(BaseHTTPRequestHandler):
             result = oi_metrics.build_oitrend(
                 body.get("underlying", ""),
                 bucket_min=int(body.get("bucketMin", 5)),
+                expiry=body.get("expiry"),
             )
             self._send(200 if result.get("ok") else 400, result)
             return

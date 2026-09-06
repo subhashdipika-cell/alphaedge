@@ -190,7 +190,7 @@ function fiveMinuteAt1400(candles, executionMin) {
   });
   // Prefer the last fully closed 13:55 candle if a live feed has already
   // opened the 14:00 candle; partial candles must not influence the signal.
-  return rows.find(c => candleStartMin(c) === executionMin - 5) || rows.at(-1) || null;
+  return rows.find(c => candleStartMin(c) === executionMin - 5) || null;
 }
 
 function referenceRange(candles, signalStartMin, cfg) {
@@ -242,6 +242,14 @@ export function zeroHeroDivergencePick({ indexA = "NIFTY50", indexB = "BANKNIFTY
   if (istMin < cfg.executionMin || istMin > cfg.executionMin + cfg.executionToleranceMin)
     return { ok: false, reason: "outside 14:00 divergence window" };
   if (!Array.isArray(candlesA) || !Array.isArray(candlesB)) return { ok: false, reason: "missing index candles" };
+  // Feed history spans several sessions. Restrict both the breakout and its
+  // reference range to the target contract's expiry session in IST.
+  const onExpiry = c => {
+    const ts = Number(c?.ts ?? c?.time);
+    return Number.isFinite(ts) && new Date(ts + 330 * 60000).toISOString().slice(0, 10) === chainB.expiry;
+  };
+  candlesA = candlesA.filter(onExpiry);
+  candlesB = candlesB.filter(onExpiry);
   const signalA = fiveMinuteAt1400(candlesA, cfg.executionMin);
   const signalB = fiveMinuteAt1400(candlesB, cfg.executionMin);
   if (!signalA || !signalB) return { ok: false, reason: "missing 14:00 index candle" };

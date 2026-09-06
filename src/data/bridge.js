@@ -274,13 +274,13 @@ export async function fetchVix() {
 // from today's collected chain CSV (stale-csv off-hours). The oi.js engine
 // derives velocity/acceleration/walls/centroids/matrix/smart-money from this.
 // Returns the bridge payload {ok, times[], underLtp[], strikes[...]} or {ok:false}.
-export async function fetchOiTrend(underlying, bucketMin = 5) {
+export async function fetchOiTrend(underlying, bucketMin = 5, expiry = null) {
   const base = bridgeBaseUrl();
   if (!base) return { ok: false, error: "no bridge URL" };
   try {
     const r = await fetch(base + "/dhan/oitrend", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ underlying, bucketMin }),
+      body: JSON.stringify({ underlying, bucketMin, expiry }),
       signal: AbortSignal.timeout(15000),
     });
     return await r.json();
@@ -361,7 +361,11 @@ export async function fetchScoreInputs(underlying, range = 8, expiry = null) {
       }
     }
   }
-  return { chain: outChain, oiTrend, vix, candles5m, candles15m, candles1H };
+  // Premium confirmation must use the exact contract being bought. Never use
+  // expiring-contract prices to calculate next-expiry stops and targets.
+  const matchedTrend = outChain?.expiry && oiTrend?.expiry !== outChain.expiry
+    ? await fetchOiTrend(underlying, 5, outChain.expiry) : oiTrend;
+  return { chain: outChain, oiTrend: matchedTrend, vix, candles5m, candles15m, candles1H };
 }
 
 // ─── Lot sizes ────────────────────────────────────────────────────────────────

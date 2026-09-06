@@ -111,7 +111,9 @@ export function analyzeSelectedOption({ oi, strike, direction, leg, config = {} 
   if (candles.length < 3) gates.push("Selected option has insufficient Dhan premium history");
   if (!leg || !(n(leg.ltp) > 0) || !(n(leg.oi) > 0) || !(n(leg.volume) > 0)) gates.push("Selected option LTP/OI/volume is incomplete");
   if (leg?.spreadPct != null && n(leg.spreadPct) > cfg.maxSpreadPct) gates.push(`Selected option spread ${(n(leg.spreadPct) * 100).toFixed(2)}% is too wide`);
-  if (leg?.bid == null || leg?.ask == null || !(n(leg.ask) > 0)) gates.push("Selected option bid/ask unavailable");
+  if (!(n(leg?.bid) > 0) || !(n(leg?.ask) > 0) || n(leg?.ask) < n(leg?.bid)) gates.push("Selected option bid/ask unavailable or crossed");
+  if (n(leg?.ask) > 0 && n(leg?.bid) > 0 && (n(leg.ask) - n(leg.bid)) / n(leg.ask) > cfg.maxSpreadPct)
+    gates.push("Selected option quoted spread is too wide");
   const adelta = Math.abs(n(leg?.delta));
   if (adelta < cfg.minDelta || adelta > cfg.maxDelta) gates.push(`Selected option delta ${adelta.toFixed(2)} outside ${cfg.minDelta}–${cfg.maxDelta}`);
   if (candles.length < 3) return { allowed: false, gates, reasons, candles };

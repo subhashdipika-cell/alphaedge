@@ -138,8 +138,9 @@ function saveHealth(patch = {}) {
   try {
     const previous = fs.existsSync(HEALTH) ? JSON.parse(fs.readFileSync(HEALTH, "utf8")) : {};
     fs.writeFileSync(HEALTH, JSON.stringify({
+      ...previous, ...patch,
       service: "alphaedge-paper-scanner", pid: process.pid, startedAt,
-      updatedAt: new Date().toISOString(), ...previous, ...patch,
+      updatedAt: new Date().toISOString(),
     }, null, 2));
   } catch (e) { console.warn("  health write failed:", e.message); }
 }
@@ -207,7 +208,7 @@ async function scanOne(store, underlying) {
     : underlying === "SENSEX" ? "sensex-option-workflow-v1" : "score-v1";
   const adaptive = adaptivePaperGate(store.trades, strategyVersion);
   if (!adaptive.allowed) {
-    return { underlying, note: `adaptive:${adaptive.status.toLowerCase()}` };
+    return { underlying, note: `adaptive:${adaptive.status.toLowerCase()}`, adaptive };
   }
   const oi = inputs.oiTrend ? analyzeOiTrend(inputs.oiTrend) : { ok: false };
   const r = scoreOption({
@@ -222,8 +223,8 @@ async function scanOne(store, underlying) {
   });
 
   if (r.verdict !== "TRADE") {
-    const tag = r.gates?.length ? `gate:${r.gates[0].slice(0, 24)}` : `${r.verdict}(${r.score})`;
-    return { underlying, note: tag };
+    const tag = r.gates?.length ? `gate:${r.gates[0]}` : `${r.verdict}(${r.score})`;
+    return { underlying, note: tag, gates: r.gates, adaptive };
   }
   // TRADE-grade but the plan can't fit even one lot inside the risk budget
   // (same affordability gate as the app's "Paper trade this" button). Surface
@@ -346,7 +347,7 @@ async function maybeZeroHeroDivergence(store, mins) {
     const [chainA, chainB] = await Promise.all([
       fetchOptionChain(indexA, CFG.range, null), fetchOptionChain(indexB, CFG.range, null),
     ]);
-    if (!chainA?.isExpiryToday || !chainB?.isExpiryToday) return;
+    if (!chainA?.ok || !chainB?.isExpiryToday) return;
     const pick = zeroHeroDivergencePick({ indexA, indexB,
       candlesA: inputsA.candles5m, candlesB: inputsB.candles5m,
       chainB, istMin: mins });
@@ -372,7 +373,7 @@ async function tick() {
 
   if (!trading) {
     saveStore(store);
-    saveHealth({ lastCycleAt: new Date().toISOString(), session: "idle", lastSummary: store.summary });
+    saveHealth({ status: "idle", lastCycleAt: new Date().toISOString(), session: "idle", notes: [], lastSummary: store.summary });
     const why = mins < ENTER_FROM ? "pre-open" : mins > STRATEGY_WINDOW_TO ? `past ${hhmm(STRATEGY_WINDOW_TO)} strategy window` : "not a trading day";
     log(`idle (${why}) · resolved ${resolved} · open ${store.summary.open}`);
     return store.summary;
@@ -380,17 +381,17 @@ async function tick() {
 
   const notes = [];
   for (const u of CFG.underlyings) {
-    try { notes.push((await scanOne(store, u)).note); }
-    catch (e) { notes.push(`err:${e.message?.slice(0, 20)}`); }
+    try { notes.push(await scanOne(store, u)); }
+    catch (e) { notes.push({ underlying: u, note: `err:${e.message}` }); }
   }
   await maybeZeroHero(store, mins);
   await maybeZeroHeroV2(store, mins);
   await maybeZeroHeroDivergence(store, mins);
   saveStore(store);
   const s = store.summary;
-  saveHealth({ lastCycleAt: new Date().toISOString(), session: "scanning", lastSummary: s,
+  saveHealth({ status: "running", lastCycleAt: new Date().toISOString(), session: "scanning", lastSummary: s,
     notes, lastTradeAt: store.trades.length ? new Date(Number(store.trades.at(-1).entryTs || store.trades.at(-1).timestamp)).toISOString() : null });
-  log(`scan ${CFG.underlyings.map((u, i) => `${u}:${notes[i]}`).join(" · ")} | open ${s.open} · resolved ${s.resolved} (${s.winRate}% WR, ${inr(s.netRs)})`);
+  log(`scan ${notes.map(n => `${n.underlying}:${n.note}`).join(" · ")} | open ${s.open} · resolved ${s.resolved} (${s.winRate}% WR, ${inr(s.netRs)})`);
   return s;
 }
 
@@ -422,7 +423,14 @@ async function main() {
   await tick();
   if (CFG.once) { log("once — exiting."); return; }
 
-  const iv = setInterval(() => { tick().catch(e => console.error("tick error:", e.message)); }, CFG.intervalMs);
+  let busy = false;
+  const iv = setInterval(async () => {
+    if (busy) return;
+    busy = true;
+    try { await tick(); }
+    catch (e) { saveHealth({ status: "error", error: e.message }); console.error("tick error:", e.message); }
+    finally { busy = false; }
+  }, CFG.intervalMs);
   const stop = () => { clearInterval(iv); log("stopped (state saved)."); process.exit(0); };
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);

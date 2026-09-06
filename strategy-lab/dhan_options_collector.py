@@ -25,6 +25,7 @@ import json
 import os
 import sys
 import time
+from dhan_pacing import paced_call, process_lock
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -114,7 +115,7 @@ def _is_throttle(err) -> bool:
 
 def future_expiries(dhan, meta) -> list[str]:
     """Sorted future expiry dates for an underlying (today's expiry included)."""
-    resp = dhan.expiry_list(meta["id"], meta["seg"])
+    resp = paced_call(dhan.expiry_list, meta["id"], meta["seg"])
     d = _unwrap(resp)
     if "_error" in d:
         log(f"  expiry_list failed: {d['_error']}"); return []
@@ -129,7 +130,7 @@ def future_expiries(dhan, meta) -> list[str]:
 
 
 def nearest_expiry(dhan, meta) -> str | None:
-    resp = dhan.expiry_list(meta["id"], meta["seg"])
+    resp = paced_call(dhan.expiry_list, meta["id"], meta["seg"])
     d = _unwrap(resp)
     if "_error" in d:
         log(f"  expiry_list failed: {d['_error']}"); return None
@@ -205,7 +206,7 @@ def snapshot(dhan, name: str, meta: dict, expiry: str, atm_range: int) -> int:
     # A short backoff clears the window, so the retry almost always succeeds.
     d = {}
     for attempt in range(1 + MAX_CHAIN_RETRIES):
-        d = _unwrap(dhan.option_chain(meta["id"], meta["seg"], expiry))
+        d = _unwrap(paced_call(dhan.option_chain, meta["id"], meta["seg"], expiry))
         if "_error" not in d:
             break
         throttled = _is_throttle(d["_error"])
@@ -319,4 +320,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        with process_lock("options-collector-owner", timeout=0):
+            main()
+    except TimeoutError as exc:
+        log(str(exc))
+        sys.exit(1)

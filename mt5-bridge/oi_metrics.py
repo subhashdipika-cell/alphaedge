@@ -65,7 +65,7 @@ def _num(v, cast=float, default=0):
         return default
 
 
-def build_oitrend(underlying, bucket_min=5, max_points=80):
+def build_oitrend(underlying, bucket_min=5, max_points=80, expiry=None):
     """Downsampled per-strike OI/LTP/IV/volume time series for one underlying.
 
     Returns a JSON-able dict; the frontend oi.js engine derives velocity,
@@ -83,8 +83,11 @@ def build_oitrend(underlying, bucket_min=5, max_points=80):
     # one the scoring stack rolls to). OI analysis targets the FRONT expiry —
     # mixing both would double-count per-strike OI.
     _exps = sorted({r.get("expiry", "") for r in rows if r.get("expiry")})
-    if len(_exps) > 1:
-        rows = [r for r in rows if r.get("expiry") == _exps[0]]
+    selected_expiry = expiry or (_exps[0] if _exps else None)
+    if selected_expiry:
+        rows = [r for r in rows if r.get("expiry") == selected_expiry]
+    if not rows:
+        return {"ok": False, "error": "No collected history for selected expiry", "expiry": selected_expiry}
 
     # Group rows by snapshot timestamp (preserve first-seen order = chronological).
     snaps = {}

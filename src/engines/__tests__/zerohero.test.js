@@ -132,6 +132,17 @@ function divergenceChain({ expiryToday = true } = {}) {
 }
 
 describe("zeroHeroDivergencePick", () => {
+  it("ignores previous-session extrema and rejects missing closed signal candles", () => {
+    const a = divergenceCandles({ breakout: "up" });
+    const b = divergenceCandles();
+    const older = a.map(c => ({ ...c, ts: c.ts - 86400000, high: 1000 }));
+    expect(zeroHeroDivergencePick({ candlesA: [...older, ...a], candlesB: b,
+      chainB: divergenceChain(), istMin: 840 }).ok).toBe(true);
+    expect(zeroHeroDivergencePick({ candlesA: older, candlesB: b,
+      chainB: divergenceChain(), istMin: 840 }).ok).toBe(false);
+    expect(zeroHeroDivergencePick({ candlesA: a.slice(0, -1), candlesB: b,
+      chainB: divergenceChain(), istMin: 840 }).ok).toBe(false);
+  });
   it("buys an ATM CE on the lagging index after driver breakout", () => {
     const r = zeroHeroDivergencePick({ candlesA: divergenceCandles({ breakout: "up" }),
       candlesB: divergenceCandles(), chainB: divergenceChain(), istMin: 14 * 60 });

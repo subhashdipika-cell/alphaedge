@@ -85,7 +85,8 @@ export function signalPnlR(signal) {
 function resolvedPaperForStrategy(records, strategyKey) {
   return records.filter(t => isResolvedSignal(t)
     && t.tradeType === "Paper"
-    && strategyVersionOf(t) === strategyKey)
+    && t.strategyVersion === strategyKey
+    && t.rMultiple != null && Number.isFinite(Number(t.rMultiple)))
     .sort((a, b) => Number(a.timestamp || a.entryTs || 0) - Number(b.timestamp || b.entryTs || 0));
 }
 
@@ -100,7 +101,8 @@ export function adaptivePaperGate(records = [], strategyKey, policy = ADAPTIVE_P
   const winRatePct = sample.length ? wins / sample.length * 100 : 0;
   const warmup = sample.length < policy.minResolvedTrades;
   const reasons = [];
-  if (!warmup && winRatePct < policy.minWinRatePct) reasons.push(`win rate ${winRatePct.toFixed(1)}% < ${policy.minWinRatePct}%`);
+  // Low win rate alone is not evidence of negative expectancy (especially
+  // for asymmetric 10R strategies). Keep loss/expectancy circuit breakers.
   if (!warmup && expectancyR < policy.minExpectancyR) reasons.push(`expectancy ${expectancyR.toFixed(2)}R < ${policy.minExpectancyR.toFixed(2)}R`);
   if (!warmup && maxDrawdownR > policy.maxDrawdownR) reasons.push(`drawdown ${maxDrawdownR.toFixed(2)}R > ${policy.maxDrawdownR.toFixed(2)}R`);
   return {
@@ -242,9 +244,7 @@ function strategyVersionOf(record) {
   if (explicit) return explicit;
   if (record?.source === "Zero-Hero") return "zero-hero-v1";
   if (record?.source === "Zero-Hero-v2") return "zero-hero-v2";
-  if (record?.assetId === "NIFTY50") return "nifty-option-workflow-v1";
-  if (record?.assetId === "SENSEX") return "sensex-option-workflow-v1";
-  return "score-v1";
+  return "legacy-unversioned";
 }
 
 export function promotionGatesByStrategy(records = [], { paperOnly = true, policy = PROMOTION_POLICY, strategies = PROMOTION_STRATEGIES } = {}) {

@@ -58,6 +58,29 @@ describe("realized outcome learning", () => {
     expect(adaptivePaperGate([], "score-v1").allowed).toBe(true);
   });
 
+  it("does not attribute unversioned historical losses to a newer workflow", () => {
+    const records = Array.from({ length: 30 }, () => ({
+      outcome: "loss", rMultiple: -1, tradeType: "Paper", assetId: "NIFTY50",
+    }));
+    expect(adaptivePaperGate(records, "nifty-option-workflow-v1").sample).toBe(0);
+    expect(promotionGate(records, { strategyKey: "nifty-option-workflow-v1" }).trades).toBe(0);
+  });
+
+  it("does not suspend positive asymmetric expectancy solely for a low win rate", () => {
+    const records = Array.from({ length: 20 }, (_, i) => ({
+      outcome: i % 5 === 4 ? "win" : "loss", rMultiple: i % 5 === 4 ? 10 : -1,
+      tradeType: "Paper", strategyVersion: "divergence", timestamp: i,
+    }));
+    expect(adaptivePaperGate(records, "divergence").allowed).toBe(true);
+  });
+
+  it("excludes missing realized results from adaptive evidence", () => {
+    const records = Array.from({ length: 30 }, () => ({
+      outcome: "loss", rMultiple: null, tradeType: "Paper", strategyVersion: "test",
+    }));
+    expect(adaptivePaperGate(records, "test").sample).toBe(0);
+  });
+
   it("pauses a strategy with persistently poor recent paper results", () => {
     const records = Array.from({ length: 10 }, (_, i) => ({
       outcome: "loss", rMultiple: -1, tradeType: "Paper",

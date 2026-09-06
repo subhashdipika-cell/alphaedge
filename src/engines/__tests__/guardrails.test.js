@@ -34,6 +34,12 @@ describe("marketSession", () => {
 });
 
 describe("evaluateGuardrails", () => {
+  it("resets the session loss stop after the IST day boundary", () => {
+    const records = [1, 2].map(i => sig({ outcome: "loss", timestamp: Date.now() - 86400000 - i * 1000 }));
+    expect(evaluateGuardrails(records, null, "NIFTY50").state.consec).toBe(0);
+    const today = records.map(r => ({ ...r, timestamp: Date.now() }));
+    expect(evaluateGuardrails(today, null, "NIFTY50").violations.some(v => v.includes("session stop"))).toBe(true);
+  });
   it("passes clean history (guardrails enabled by default)", () => {
     const ev = evaluateGuardrails([], null, "NIFTY50");
     expect(ev.state.disabled).toBeUndefined();
