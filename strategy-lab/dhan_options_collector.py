@@ -101,14 +101,11 @@ def _unwrap(resp):
 
 
 def _is_throttle(err) -> bool:
-    """A Dhan option-chain rate-limit hit returns an empty/None-filled remarks
-    dict (error_code/type/message all None) or a 'rate limit' string. Those are
-    transient (the bridge shares this account's ~1-req/3s budget) and worth a
-    retry; a real error (bad token, bad params) is surfaced instead."""
+    """Retry explicit throttling only; empty SDK remarks do not identify a cause."""
     if err in (None, "", {}):
-        return True
+        return False
     if isinstance(err, dict):
-        return all(v in (None, "", "null") for v in err.values())
+        err = " ".join(str(v) for v in err.values() if v is not None)
     s = str(err).lower()
     return any(k in s for k in ("rate", "limit", "too many", "904", "throttl"))
 
@@ -284,6 +281,10 @@ def main():
             log("Market closed — sleeping 5 min.")
             time.sleep(300)
             continue
+        # The launcher refreshes dhan_config.json independently of this long-
+        # running worker. Never retain the startup token for the whole session.
+        # Rebuilding locally does not request or rotate any credentials.
+        dhan = build_client()
         today = _today()
         for name, meta in UNDERLYINGS.items():
             exps = expiries.get(name) or []
