@@ -9,6 +9,7 @@
 
 import { detectSwings, detectBOS, detectOrderBlocks, detectFVGs, detectLiquidity, detectMSLabels, detectPD, calcEMAs, calcRSI, calcATR, calcVWAP } from "./ict.js";
 import { detectRegime } from "./regime.js";
+import { nowIST } from "../lib/ist.js";
 import { expectedMove, selectStrike, optionsTradePlan } from "./strike.js";
 import { evaluateGuardrails, marketSession } from "./guardrails.js";
 import { selectStyle, styleWeights, STYLE_STRIKE, STYLE_HOLD, getStrikePref } from "./style.js";
@@ -44,13 +45,6 @@ export const STYLE_ENTRY_WINDOW = {
   INTRADAY: { from: 9 * 60 + 15,  to: 13 * 60 },
   SWING:    { from: 9 * 60 + 15,  to: 13 * 60 },
 };
-
-// Minutes-of-day IST (same idiom as lib/ist.js — correct on any machine zone).
-function istMinutesNow() {
-  const n = new Date();
-  const ist = new Date(n.getTime() + (n.getTimezoneOffset() + 330) * 60000);
-  return ist.getHours() * 60 + ist.getMinutes();
-}
 
 export function getScoreWeights() {
   try {
@@ -334,7 +328,7 @@ export function scoreOption(inputs) {
     ? { style: "SCALP", label: "Dhan NIFTY Option Scalp", reasons: ["NIFTY index context to option-premium confirmation"], alternatives: [] }
     : inputs.style
     ? { style: inputs.style, label: STYLE_STRIKE[inputs.style] ? inputs.style : inputs.style, reasons: ["Manual style override"], alternatives: [] }
-    : selectStyle({ regime, vix, dteYears, ivp: chain?.ivPercentile ?? null, atNow: inputs.atNow });
+    : selectStyle({ regime, vix, dteYears, ivp: chain?.ivPercentile ?? null, atNow: inputs.atNow ?? asOfMs });
   const style = styleSel.style;
   const strikePref = getStrikePref(style);
   // 0-DTE is allowed for SCALP only, tightly: a hard 15-min time-stop and a
@@ -350,7 +344,7 @@ export function scoreOption(inputs) {
   // ── HARD GATES ──
   if (!chain?.ok && !chain?.strikes?.length) gates.push("No option chain — cannot evaluate");
   if (!candles15m || candles15m.length < 50) gates.push("Insufficient candle history");
-  const guardEval = evaluateGuardrails(history, { asset: underlying }, underlying);
+  const guardEval = evaluateGuardrails(history, { asset: underlying }, underlying, asOfMs);
   if (guardEval.blocked) gates.push(`Guardrail: ${guardEval.violations[0]}`);
   // 0-DTE blocked for intraday/swing; scalp is allowed (tight, half-size).
   if (chain?.isExpiryToday && getGuardBlockExpiry() && style !== "SCALP")
@@ -358,11 +352,12 @@ export function scoreOption(inputs) {
   if (eventSoon) gates.push(`High-impact event in ~${eventMin}m — stand aside`);
   // Style entry window (empirical — see STYLE_ENTRY_WINDOW). Only enforced while
   // the market is open: off-hours scoring is research/preview, not an entry.
-  const nowMin = Number.isFinite(inputs.nowMin) ? inputs.nowMin : istMinutesNow();
+  const observedIST = nowIST(asOfMs);
+  const nowMin = Number.isFinite(inputs.nowMin) ? inputs.nowMin : observedIST.getHours() * 60 + observedIST.getMinutes();
   const indexContext = indexOptionWorkflow
     ? (sensexOptionWorkflow
-      ? analyzeSensexIndexContext({ candles5m, candles15m, nowMin: inputs.nowMin, config: inputs.sensexOptionConfig })
-      : analyzeIndexContext({ underlying, candles5m, candles15m, nowMin: inputs.nowMin,
+      ? analyzeSensexIndexContext({ candles5m, candles15m, nowMin, config: inputs.sensexOptionConfig })
+      : analyzeIndexContext({ underlying, candles5m, candles15m, nowMin,
           config: inputs.niftyOptionScalpConfig }))
     : null;
   const niftyContext = niftyOptionWorkflow ? indexContext : null;
@@ -386,7 +381,7 @@ export function scoreOption(inputs) {
     gates.push(`Regime ${regime.label} — not favorable for option buying`);
   }
 
-  const session = marketSessionQuality(underlying);
+  const session = marketSessionQuality(underlying, asOfMs);
 
   // ── score both directions ──
   const scoreDir = (dir, chosenLeg) => {
@@ -605,6 +600,6 @@ function getGuardMinPremium() {
   try { return Number(JSON.parse(localStorage.getItem("alphaedge_guardrails") || "{}").minPremium ?? 40); } catch { return 40; }
 }
 // Session quality for the underlying.
-function marketSessionQuality(underlying) {
-  try { return marketSession(underlying).quality; } catch { return "ok"; }
+function marketSessionQuality(underlying, at) {
+  try { return marketSession(underlying, at).quality; } catch { return "ok"; }
 }

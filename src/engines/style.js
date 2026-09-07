@@ -70,7 +70,7 @@ export const STYLE_HOLD = {
 // ivp = ATM IV percentile (0–100): cheap IV favours swing (Vega tailwind); bloated
 // IV is buyer-hostile for holds, so restrict to scalps that exit before IV moves.
 export function selectStyle({ regime, vix, dteYears, ivp = null, atNow = null } = {}) {
-  const ist = atNow ? new Date(atNow) : nowIST();
+  const ist = nowIST(atNow ?? Date.now());
   const mins = ist.getHours() * 60 + ist.getMinutes();
   const vl = vix?.vix?.ltp ?? null;
   const dteDays = (dteYears ?? (1 / 365)) * 365;

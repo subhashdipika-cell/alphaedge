@@ -82,7 +82,7 @@ async function main() {
             const legacy = family === 'legacy';
             const r = scoreOption({ underlying, candles5m: a5, candles15m: a15, candles1H: a1, chain, oi,
               vix: null, history: [], events: {}, mm: { capital: 400000, rr: 2 }, riskPct: 1,
-              nowMin: mins, atNow: ts, asOfTs: ts, dhanOptionScalp: !legacy && underlying === 'NIFTY50',
+              nowMin: mins, atNow: ts, asOfTs: ts, niftyOptionWorkflow: !legacy && underlying === 'NIFTY50',
               sensexOptionWorkflow: !legacy && underlying === 'SENSEX', optionWorkflow: !legacy, legacyReplay: legacy });
             if (r.verdict !== 'TRADE' || !r.strike || !(r.plan?.lots >= 1)) { gate(s, r.gates?.[0] || r.verdict); continue; }
             records = [{ assetId: underlying, strike: r.strike.strike, direction: r.direction, optionPremium: r.strike.ltp,

@@ -207,6 +207,20 @@ describe("scoreOption — coverage renormalization", () => {
 });
 
 describe("scoreOption — NIFTY chart-first workflow", () => {
+  it("does not force a chart-first directional setup into the expired scalp window", () => {
+    const inputs = { underlying: "NIFTY50", candles5m: trendUp(), candles15m: trendUp(), candles1H: trendUp(),
+      chain: bullChain(), oi: bullOi(), vix, history: [], optionWorkflow: true,
+      asOfTs: Date.parse("2026-09-07T06:00:00Z") };
+    const prior = scoreOption({ ...inputs, dhanOptionScalp: true });
+    const current = scoreOption({ ...inputs, niftyOptionWorkflow: true });
+    expect(prior.style.style).toBe("SCALP");
+    expect(prior.gates.some(g => g.includes("Outside the scalp window"))).toBe(true);
+    expect(current.style.style).toBe("INTRADAY");
+    expect(current.gates.some(g => g.includes("Outside the scalp window"))).toBe(false);
+    // Removing a routing mismatch does not remove premium-data validation.
+    expect(current.gates.some(g => g.startsWith("Option premium:"))).toBe(true);
+    expect(current.verdict).toBe("NO_TRADE");
+  });
   it("keeps the selected strategy style while using NIFTY context", () => {
     const r = scoreOption({ underlying: "NIFTY50", candles5m: trendUp(), candles15m: trendUp(), candles1H: trendUp(),
       chain: bullChain(), oi: bullOi(), vix, history: [], style: "INTRADAY", nowMin: AT_1030,

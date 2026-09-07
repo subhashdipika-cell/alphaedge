@@ -3,8 +3,8 @@
 
 export const IST_SHIFT_MS = 330 * 60000;
 
-export function nowIST() {
-  const n = new Date();
+export function nowIST(at = Date.now()) {
+  const n = new Date(at);
   return new Date(n.getTime() + (n.getTimezoneOffset() + 330) * 60000);
 }
 

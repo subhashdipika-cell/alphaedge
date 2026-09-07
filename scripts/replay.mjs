@@ -1,8 +1,8 @@
-// ─── OPTIONS-PREMIUM SCORE REPLAY (out-of-sample R&D backtest) ─────────────────
+// ─── OPTIONS-PREMIUM SCORE REPLAY (research, not promotion evidence) ───────────
 // Replays the SAME score/OI/style/resolve engines over the collected option-chain
 // CSVs (strategy-lab/data/options/*.csv), day by day, producing a paper-trade
-// track record with full factor breakdowns. This is the out-of-sample validation
-// for the score engine — one engine implementation, reused (no Python port).
+// track record with full factor breakdowns. Reusing this data for tuning does
+// not make it out-of-sample; portfolio/adaptive-state validation is separate.
 //
 // Usage:
 //   node scripts/replay.mjs                         # all underlyings, all days
@@ -12,6 +12,7 @@
 //   node scripts/replay.mjs --underlying NIFTY50 --research true
 //     (research-only: bypasses the production scalp entry-time window)
 //   node scripts/replay.mjs --variant legacy
+//   node scripts/replay.mjs --variant prior-routing  # pre-repair forced NIFTY scalp
 //
 // Writes strategy-lab/results/replay_{from}_{to}.json for the R&D page (served
 // by the bridge GET /rd/replay).
@@ -142,6 +143,7 @@ const CFG = {
   targetR: Number(opt("target-r", 1.8)),
   variant: opt("variant", "current"),
 };
+if (!["current", "prior-routing", "legacy"].includes(CFG.variant)) throw new Error("Unknown replay variant");
 
 const IST = 330;
 const utcToIstHHMM = (utc) => {
@@ -281,7 +283,8 @@ function replayDay({ file, underlying, date }, candleHist) {
       underlying, candles5m: c5, candles15m: c15, candles1H: c1h,
       chain, oi, vix: null, history: [], events: {}, mm: { capital: CFG.capital, rr: 2 }, riskPct: CFG.risk,
       nowMin: mins, atNow: replayTs, asOfTs: replayTs,
-      dhanOptionScalp: CFG.variant !== "legacy" && underlying === "NIFTY50",
+      dhanOptionScalp: CFG.variant === "prior-routing" && underlying === "NIFTY50",
+      niftyOptionWorkflow: CFG.variant === "current" && underlying === "NIFTY50",
       sensexOptionWorkflow: CFG.variant !== "legacy" && underlying === "SENSEX",
       optionWorkflow: CFG.variant !== "legacy",
       ignoreEntryWindow: CFG.research,
@@ -380,7 +383,7 @@ async function main() {
       firstGates: Object.fromEntries(Object.entries(diagnostics.firstGates).sort((a, b) => b[1] - a[1]).slice(0, 10)),
       allGates: Object.fromEntries(Object.entries(diagnostics.allGates).sort((a, b) => b[1] - a[1]).slice(0, 15)) } };
   fs.mkdirSync(OUT_DIR, { recursive: true });
-  const outFile = path.join(OUT_DIR, `replay_${from}_${to}.json`);
+  const outFile = path.join(OUT_DIR, `replay_${from}_${to}_${CFG.variant}.json`);
   fs.writeFileSync(outFile, JSON.stringify({ summary, trades: all }, null, 2));
   // Also write a stable "latest" pointer the bridge/R&D page reads by default.
   fs.writeFileSync(path.join(OUT_DIR, "replay_latest.json"), JSON.stringify({ summary, trades: all }));

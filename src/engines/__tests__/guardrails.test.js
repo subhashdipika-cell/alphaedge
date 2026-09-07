@@ -34,6 +34,14 @@ describe("marketSession", () => {
 });
 
 describe("evaluateGuardrails", () => {
+  it("evaluates opening lockout and cooldown at the historical observation time", () => {
+    const morning = Date.parse("2026-09-07T04:30:00Z"); // 10:00 IST
+    const noon = Date.parse("2026-09-07T06:30:00Z");
+    expect(evaluateGuardrails([], null, "NIFTY50", morning).violations.some(v => v.includes("open lockout"))).toBe(true);
+    expect(evaluateGuardrails([], null, "NIFTY50", noon).violations.some(v => v.includes("open lockout"))).toBe(false);
+    const loss = { timestamp: noon - 600000, resolvedAt: noon - 300000, outcome: "loss" };
+    expect(evaluateGuardrails([loss], null, "NIFTY50", noon).violations.some(v => /cooldown/i.test(v))).toBe(true);
+  });
   it("resets the session loss stop after the IST day boundary", () => {
     const records = [1, 2].map(i => sig({ outcome: "loss", timestamp: Date.now() - 86400000 - i * 1000 }));
     expect(evaluateGuardrails(records, null, "NIFTY50").state.consec).toBe(0);

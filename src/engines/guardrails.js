@@ -84,9 +84,9 @@ export function marketSession(asset, at = null) {
 // `asset` lets exchange-specific rules (NSE open lockout) target Indian markets.
 // Returns { blocked, violations[], warnings[], state{} } — drives both the
 // STAND-DOWN verdict and the live Discipline Monitor.
-export function evaluateGuardrails(history = [], signal = null, asset = null) {
+export function evaluateGuardrails(history = [], signal = null, asset = null, asOfTs = Date.now()) {
   const g = getGuardrails();
-  const ist = nowIST();
+  const ist = nowIST(asOfTs);
   const mins = ist.getHours() * 60 + ist.getMinutes();
   const todayKey = ist.toDateString();
   const violations = [], warnings = [];
@@ -104,7 +104,7 @@ export function evaluateGuardrails(history = [], signal = null, asset = null) {
   // Count cooldown from when the loss resolved if known, else from signal time.
   const lossTime = lastLoss ? (lastLoss.closedAt || lastLoss.resolvedAt || lastLoss.timestamp) : 0;
   const cooldownLeft = lastLoss
-    ? Math.max(0, Math.ceil(g.cooldownMin - (Date.now() - lossTime) / 60000))
+    ? Math.max(0, Math.ceil(g.cooldownMin - (asOfTs - lossTime) / 60000))
     : 0;
 
   if (!g.enabled) {
@@ -133,7 +133,7 @@ export function evaluateGuardrails(history = [], signal = null, asset = null) {
   }
   // 5) Expiry-day / 0-DTE (option signals only)
   if (g.blockExpiryDay && signal && signal.expiry) {
-    if (istDayKey(signal.timestamp || Date.now()) === istDayKey(new Date(signal.expiry).getTime()))
+    if (istDayKey(signal.timestamp || asOfTs) === istDayKey(new Date(signal.expiry).getTime()))
       violations.push("0-DTE long blocked — no option buying on expiry day");
   }
   // 6) Premium floor (option signals only)
@@ -143,7 +143,8 @@ export function evaluateGuardrails(history = [], signal = null, asset = null) {
   }
   // 7) NSE holiday + intraday square-off (Indian instruments only).
   if (indian) {
-    if (getNseHolidayInfo()?.isHoliday)
+    // The cache describes today, not an arbitrary historical replay session.
+    if (istDayKey(asOfTs) === istDayKey(Date.now()) && getNseHolidayInfo()?.isHoliday)
       violations.push("NSE holiday today (Dhan calendar) — Indian market closed");
     else if (mins >= 15 * 60 + 12 && mins <= 15 * 60 + 30)
       violations.push("NSE square-off — no new entries after 15:12 IST (positions flattened 15:12, close 15:30)");

@@ -208,24 +208,27 @@ async function scanOne(store, underlying) {
   const strategyVersion = underlying === "NIFTY50" ? "nifty-option-workflow-v1"
     : underlying === "SENSEX" ? "sensex-option-workflow-v1" : "score-v1";
   const adaptive = adaptivePaperGate(store.trades, strategyVersion);
-  if (!adaptive.allowed) {
-    return { underlying, note: `adaptive:${adaptive.status.toLowerCase()}`, adaptive };
-  }
   const oi = inputs.oiTrend ? analyzeOiTrend(inputs.oiTrend) : { ok: false };
   const r = scoreOption({
     underlying,
     candles5m: inputs.candles5m, candles15m: inputs.candles15m, candles1H: inputs.candles1H,
     chain: inputs.chain, oi, vix: inputs.vix,
-    dhanOptionScalp: underlying === "NIFTY50",
+    niftyOptionWorkflow: underlying === "NIFTY50",
     sensexOptionWorkflow: underlying === "SENSEX",
     optionWorkflow: true,
     history: store.trades, events: eventProximity(underlying),
     mm: { ...getMoneyMgt(), capital: CFG.capital }, riskPct: CFG.risk,
   });
 
+  // Score paused strategies for diagnostics only; their veto still precedes entry.
+  const diagnostic = { underlying, strategyVersion, executionRevision: "regime-routing-2026-09-07",
+    style: r.style?.style, score: r.score, verdict: r.verdict, gates: r.gates, adaptive };
+  if (!adaptive.allowed) {
+    return { ...diagnostic, note: `adaptive:${adaptive.status.toLowerCase()}` };
+  }
   if (r.verdict !== "TRADE") {
     const tag = r.gates?.length ? `gate:${r.gates[0]}` : `${r.verdict}(${r.score})`;
-    return { underlying, note: tag, gates: r.gates, adaptive };
+    return { ...diagnostic, note: tag };
   }
   // TRADE-grade but the plan can't fit even one lot inside the risk budget
   // (same affordability gate as the app's "Paper trade this" button). Surface
@@ -254,7 +257,7 @@ async function scanOne(store, underlying) {
     maxHoldMin: r.plan.maxHoldMin, squareOff: r.plan.squareOff !== false,
     trailStop: r.plan.trailStop === true, trailArmPts: r.plan.trailArmPts, trailPts: r.plan.trailPts,
     riskReward: r.plan.rr, expiry: r.strike.expiry, strike: r.strike.strike, direction: r.direction,
-    entryQuote: "ask", strategyVersion,
+    entryQuote: "ask", strategyVersion, executionRevision: "regime-routing-2026-09-07",
     summary: r.report.map(l => `${l.k}: ${l.v}`).join(" · "),
     scoreFactors: Object.fromEntries(Object.entries(r.factors).map(([k, f]) => [k, f.score01])),
     structure: r.structure ? {
@@ -407,6 +410,9 @@ async function tick() {
   await maybeZeroHeroDivergence(store, mins);
   saveStore(store);
   const s = store.summary;
+  // Keep session evidence after idle health updates clear the current notes.
+  fs.appendFileSync(path.join(STORE_DIR, `scan-decisions-${istDateStr()}.jsonl`),
+    JSON.stringify({ at: new Date().toISOString(), pid: process.pid, notes, summary: s }) + "\n");
   saveHealth({ status: "running", lastCycleAt: new Date().toISOString(), session: "scanning", lastSummary: s,
     notes, lastTradeAt: store.trades.length ? new Date(Number(store.trades.at(-1).entryTs || store.trades.at(-1).timestamp)).toISOString() : null });
   log(`scan ${notes.map(n => `${n.underlying}:${n.note}`).join(" · ")} | open ${s.open} · resolved ${s.resolved} (${s.winRate}% WR, ${inr(s.netRs)})`);
