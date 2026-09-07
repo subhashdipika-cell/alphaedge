@@ -31,8 +31,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Force UTF-8 output on Windows consoles
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+if __name__ == "__main__":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 # Official Dhan SDK — handles auth headers, the required dhanClientId body field,
 # and integer intervals. Install with:  pip install dhanhq
@@ -61,8 +62,19 @@ INTRADAY_TFS = {
     60: "H1",
 }
 
-# Dhan intraday allows at most ~90 days of history per request.
+# This is a per-request limit, NOT a retention limit. Longer ranges are chunked.
 MAX_INTRADAY_DAYS = 90
+
+
+def request_windows(start, end, chunk_days=30):
+    """Inclusive calendar dates, explicit session bounds, no 90-day truncation."""
+    start, end = datetime.strptime(start, '%Y-%m-%d').date(), datetime.strptime(end, '%Y-%m-%d').date()
+    if start > end or not 1 <= chunk_days <= MAX_INTRADAY_DAYS:
+        raise ValueError('Invalid history date range or chunk size')
+    while start <= end:
+        stop = min(end, start + timedelta(days=chunk_days - 1))
+        yield f'{start} 09:15:00', f'{stop} 15:30:00'
+        start = stop + timedelta(days=1)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -169,14 +181,30 @@ def main():
                         help="Pull daily candles (for swing backtests) instead of intraday")
     parser.add_argument("--only", type=str, default="",
                         help="Comma-separated instrument names to limit to (e.g. NIFTY50,BANKNIFTY)")
+    parser.add_argument("--indices-only", action="store_true", help="Skip futures resolution and futures requests")
+    parser.add_argument("--from-date", help="First date, YYYY-MM-DD (overrides --days)")
+    parser.add_argument("--to-date", help="Last date inclusive, YYYY-MM-DD (default today IST)")
+    parser.add_argument("--chunk-days", type=int, default=30, help="Calendar days per request, 1–90")
     args = parser.parse_args()
 
+    today = datetime.now(timezone(timedelta(minutes=330))).date()
+    if args.days < 1:
+        parser.error('--days must be positive')
+    from_date = args.from_date or (today - timedelta(days=args.days)).isoformat()
+    to_date = args.to_date or today.isoformat()
+    try:
+        windows = list(request_windows(from_date, to_date, args.chunk_days))
+        if datetime.strptime(to_date, '%Y-%m-%d').date() > today:
+            raise ValueError('Future end date is not allowed')
+    except ValueError as exc:
+        parser.error(str(exc))
     dhan = build_client()
 
     chosen = dict(INDEX_INSTRUMENTS)
     try:
-        from dhan_futures import current_futures
-        chosen.update({name + ':FUTIDX': meta for name, meta in current_futures().items()})
+        if not args.indices_only:
+            from dhan_futures import current_futures
+            chosen.update({name + ':FUTIDX': meta for name, meta in current_futures().items()})
     except Exception as exc:
         log(f"Futures resolution unavailable; continuing index collection: {type(exc).__name__}")
     if args.only:
@@ -188,35 +216,44 @@ def main():
 
     if not chosen:
         log("No instruments selected. Add some to INSTRUMENTS or check --only.")
-        return
-
-    today = datetime.now(timezone.utc).date()
-    days  = args.days
-    if not args.daily and days > MAX_INTRADAY_DAYS:
-        log(f"Intraday history capped at {MAX_INTRADAY_DAYS} days — using {MAX_INTRADAY_DAYS}.")
-        days = MAX_INTRADAY_DAYS
-    from_date = (today - timedelta(days=days)).strftime("%Y-%m-%d")
-    to_date   = today.strftime("%Y-%m-%d")
+        return 2
 
     mode = "DAILY" if args.daily else "INTRADAY"
     log(f"=== Dhan collector starting ({mode}, {from_date} -> {to_date}) ===")
     log(f"Instruments: {', '.join(chosen)}")
 
+    failures = []
     for name, meta in chosen.items():
         if args.daily:
             rows = fetch_daily(dhan, meta, from_date, to_date)
             n = append_verified(DATA_DIR, name.split(':')[0], "D1", rows, meta)
             log(f"  {name} D1: +{n} new bars ({len(rows)} fetched)")
+            if not rows:
+                failures.append(f'{name}/D1: empty or failed response')
             time.sleep(0.6)  # be gentle on rate limits
         else:
             for interval, tf in INTRADAY_TFS.items():
-                rows = fetch_intraday(dhan, meta, interval, from_date, to_date)
-                n = append_verified(DATA_DIR, name.split(':')[0], tf, rows, meta)
-                log(f"  {name} {tf}: +{n} new bars ({len(rows)} fetched)")
-                time.sleep(0.6)
+                for start, end in windows:
+                    try:
+                        rows = fetch_intraday(dhan, meta, interval, start, end)
+                        n = append_verified(DATA_DIR, name.split(':')[0], tf, rows, meta)
+                        log(f"  {name} {tf} {start[:10]}..{end[:10]}: +{n} new bars ({len(rows)} fetched)")
+                        if not rows:
+                            failures.append(f'{name}/{tf}/{start[:10]}: empty or failed response')
+                    except Exception as exc:
+                        # Do not log exception bodies which might contain request credentials.
+                        failures.append(f'{name}/{tf}/{start[:10]}: {type(exc).__name__}')
+                        log(f"  {name} {tf}: request/archive failed ({type(exc).__name__})")
+                    time.sleep(1.1)
 
+    if failures:
+        log(f"=== Incomplete history collection: {len(failures)} empty/failed requests; not evidence of coverage ===")
+        for failure in failures:
+            log(failure)
+        return 2
     log("=== Dhan collector done ===")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -17,6 +17,7 @@ import subprocess
 import sys
 import time
 import json
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -144,9 +145,24 @@ def run_dhan_collector(days: int):
         )
         for line in (proc.stdout or "").splitlines():
             print("  [dhan]", line)
+        if proc.returncode:
+            log(f"WARNING: Dhan history collection incomplete (exit {proc.returncode}); do not treat this as verified coverage.")
+            return False
     except Exception as e:
         log(f"Dhan collector error: {e}")
+        return False
     log("Dhan collection done.")
+    node = shutil.which('node')
+    if node:
+        try:
+            coverage = subprocess.run([node, str(ROOT.parent / 'scripts' / 'check-history-coverage.mjs')],
+                                      capture_output=True, text=True, timeout=180)
+            log(f"History coverage report exit {coverage.returncode}; see strategy-lab/results/history-coverage.json")
+        except Exception as exc:
+            log(f"History coverage report failed ({type(exc).__name__})")
+    else:
+        log('History coverage report unavailable: Node.js not found')
+    return True
 
 
 def run_zerohero_index_collector(days: int):
@@ -288,8 +304,8 @@ def main():
                         help="Skip collection, run analysis on existing data")
     parser.add_argument("--max-dd", type=float, default=20.0,
                         help="Max drawdown as %% of equity (default 20%%)")
-    parser.add_argument("--dhan-days", type=int, default=5,
-                        help="Days of Dhan intraday history to pull (default 5)")
+    parser.add_argument("--dhan-days", type=int, default=21,
+                        help="Days of Dhan intraday history to refresh (default 21, overlapping warm-up)")
     parser.add_argument("--zerohero-index-days", type=int, default=5,
                         help="Days of NIFTY/BANKNIFTY spot candles to refresh (default 5)")
     args = parser.parse_args()
@@ -307,6 +323,9 @@ def main():
                 wait_for_options_collector(opt_proc, hours=args.collect_hours)
             finally:
                 stop_options_collector(opt_proc)
+            # Morning collection cannot contain the rest of today's completed
+            # index candles. Refresh after collection so the next replay has them.
+            run_dhan_collector(days=args.dhan_days)
         finally:
             release_awake()
             log("Keep-awake released.")
